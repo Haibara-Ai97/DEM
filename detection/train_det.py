@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 import yaml
 
 from datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
-from models.detector_factory import build_baseline_fasterrcnn, build_dem_fasterrcnn
+from models.detector_factory import build_baseline_fasterrcnn, build_dem_fasterrcnn, build_swin_fasterrcnn, build_convnext_fasterrcnn, build_r50_custom_fasterrcnn
 from utils.engine import train_one_epoch, evaluate
 from utils.misc import set_seed, collate_fn, save_checkpoint
 from utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
@@ -23,8 +23,19 @@ def parse_args():
     p.add_argument("--split_val", type=str, default="valid")
     p.add_argument("--classes_txt", type=str, default="classes.txt")
 
-    p.add_argument("--model", type=str, default="dem_resnet50",
-                   choices=["baseline_resnet50_fpn", "dem_resnet50"])
+    p.add_argument(
+        "--model",
+        type=str,
+        default="r50_custom_fpn",
+        choices=[
+            "r50_custom_fpn",
+            "convnext_tiny_fpn",
+            "swin_tiny_fpn",
+            "dem_resnet50",
+            "baseline_resnet50_fpn",
+        ],
+    )
+
     p.add_argument("--num_classes", type=int, default=None, help="Foreground classes K. If omitted, inferred from classes.txt")
 
     p.add_argument("--config", type=str, default="configs/default.yaml")
@@ -125,21 +136,52 @@ def main():
         collate_fn=collate_fn
     )
 
+    anchor_sizes = list(cfg["anchor_sizes"])
+    aspect_ratios = list(cfg["aspect_ratios"])
+
     if args.model == "baseline_resnet50_fpn":
         model = build_baseline_fasterrcnn(num_classes_fg)
-    else:
+
+    elif args.model == "r50_custom_fpn":
+        model = build_r50_custom_fasterrcnn(
+            num_classes_fg,
+            anchor_sizes=anchor_sizes,
+            aspect_ratios=aspect_ratios,
+        )
+
+    elif args.model == "convnext_tiny_fpn":
+        model = build_convnext_fasterrcnn(
+            num_classes_fg,
+            anchor_sizes=anchor_sizes,
+            aspect_ratios=aspect_ratios,
+            convnext_name="convnext_tiny",
+            pretrained_convnext=True,
+        )
+
+    elif args.model == "swin_tiny_fpn":
+        model = build_swin_fasterrcnn(
+            num_classes_fg,
+            anchor_sizes=anchor_sizes,
+            aspect_ratios=aspect_ratios,
+            swin_name="swin_t",
+            pretrained_swin=True,
+        )
+
+    elif args.model == "dem_resnet50":
         model = build_dem_fasterrcnn(
             num_classes_fg,
             dem_C=int(cfg["dem_C"]),
             init_gamma=float(cfg["dem_init_gamma"]),
             lf_kernel=int(cfg["dem_lf_kernel"]),
-            anchor_sizes=list(cfg["anchor_sizes"]),
-            aspect_ratios=list(cfg["aspect_ratios"]),
+            anchor_sizes=anchor_sizes,
+            aspect_ratios=aspect_ratios,
             disable_dem2=args.disable_dem2,
             disable_dem3=args.disable_dem3,
             disable_dem4=args.disable_dem4,
             disable_dem5=args.disable_dem5,
         )
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
 
     model.to(device)
 
