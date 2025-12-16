@@ -14,6 +14,7 @@ from models.detector_factory import build_baseline_fasterrcnn, build_dem_fasterr
 from utils.engine import train_one_epoch, evaluate
 from utils.misc import set_seed, collate_fn, save_checkpoint
 from utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
+from utils.misc import load_checkpoint
 
 def parse_args():
     p = argparse.ArgumentParser("Detection Experiment (YOLO folder dataset): Faster R-CNN baseline vs DEM-Encoder backbone")
@@ -59,6 +60,8 @@ def parse_args():
 
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--seed", type=int, default=None)
+
+    p.add_argument("--resume", type=str, default="", help="Path to checkpoint (.pth) to resume from, e.g. outputs/last.pth")
 
     return p.parse_args()
 
@@ -205,7 +208,23 @@ def main():
     best_map = -1.0
     metrics_path = os.path.join(args.output_dir, "metrics.jsonl")
 
-    for epoch in range(int(cfg["epochs"])):
+    start_epoch = 0
+    if args.resume:
+        model_to_load = model
+        ckpt = load_checkpoint(
+            args.resume,
+            model_to_load,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler_main,
+            map_location="cpu",
+        )
+        start_epoch = int(ckpt.get("epoch", -1))+1
+        best_map = float(ckpt.get("best_map", -1.0))
+
+        print(f"[Resume] Loaded {args.resume}")
+        print(f"[Resume] start epoch: {start_epoch}, best_map: {best_map:.4}")
+
+    for epoch in range(start_epoch, int(cfg["epochs"])):
         lr_sched = lr_scheduler_warmup if (epoch == 0 and warmup_iters > 0) else None
 
         train_stats = train_one_epoch(model, optimizer, train_loader, device, epoch, lr_scheduler=lr_sched)
