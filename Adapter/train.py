@@ -71,16 +71,21 @@ def collate_fn(batch_imgs: List[Image.Image], clip_processor: CLIPProcessor, enc
 # -------------------------
 @torch.no_grad()
 def clip_patch_embeds(clip: CLIPModel, pixel_values: torch.Tensor) -> torch.Tensor:
-    """
-    返回 (B, N, D_clip_embed) patch embedding（已归一化）
-    """
-    out = clip.vision_model(pixel_values=pixel_values, return_dict=True)
-    h = out.last_hidden_state                            # (B,1+N,Dv)
-    h = clip.vision_model.post_layernorm(h)
-    patch = h[:, 1:, :]                                  # (B,N,Dv)
-    patch = clip.visual_projection(patch)                # (B,N,De)
+    out = clip.vision_model(pixel_values=pixel_values)  # 不传 return_dict
+
+    if isinstance(out, (tuple, list)):
+        hidden = out[0]
+    else:
+        hidden = out.last_hidden_state
+
+    if hasattr(clip.vision_model, "post_layernorm"):
+        hidden = clip.vision_model.post_layernorm(hidden)
+
+    patch = hidden[:, 1:, :]
+    patch = clip.visual_projection(patch)
     patch = F.normalize(patch, dim=-1)
     return patch
+
 
 
 @torch.no_grad()
