@@ -108,12 +108,27 @@ def _symmetric_infonce(v: torch.Tensor, s: torch.Tensor, temperature: float = 0.
 
 @torch.no_grad()
 def _clip_patch_embeds(clip: CLIPModel, pixel_values: torch.Tensor) -> torch.Tensor:
-    out = clip.vision_model(pixel_values=pixel_values, return_dict=True)
-    h = out.last_hidden_state
-    h = clip.vision_model.post_layernorm(h)
-    patch = h[:, 1:, :]
-    patch = clip.visual_projection(patch)
-    return F.normalize(patch, dim=-1)
+    """
+    兼容旧版 transformers：vision_model.forward 不支持 return_dict
+    返回 (B, N, D_clip_embed) patch embedding（已归一化）
+    """
+    out = clip.vision_model(pixel_values=pixel_values)  # 不传 return_dict
+
+    # 兼容：旧版通常返回 tuple，新版可能返回带属性的输出对象
+    if isinstance(out, (tuple, list)):
+        hidden = out[0]  # last_hidden_state: (B, 1+N, Dv)
+    else:
+        hidden = out.last_hidden_state
+
+    # post_layernorm 在 CLIPVisionTransformer 中通常存在
+    if hasattr(clip.vision_model, "post_layernorm"):
+        hidden = clip.vision_model.post_layernorm(hidden)
+
+    patch = hidden[:, 1:, :]                 # 去 CLS -> (B, N, Dv)
+    patch = clip.visual_projection(patch)    # -> (B, N, De)
+    patch = F.normalize(patch, dim=-1)
+    return patch
+
 
 
 @torch.no_grad()
