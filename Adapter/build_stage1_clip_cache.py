@@ -9,6 +9,13 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import CLIPModel, CLIPProcessor
 
+import os
+import multiprocessing as mp
+from tqdm import tqdm
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
 
 class ImgCsv(Dataset):
     def __init__(self, csv_path):
@@ -54,6 +61,8 @@ def main():
     ap.add_argument("--dtype", type=str, default="float16", choices=["float16","float32"])
     args = ap.parse_args()
 
+    mp.set_start_method("spawn", force=True)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -76,7 +85,7 @@ def main():
     # 保存一个 index，方便训练阶段读取
     index_rows = []
 
-    for paths, pixel_values in dl:
+    for paths, pixel_values in tqdm(dl, total=len(dl)):
         pixel_values = pixel_values.to(device)
         patch = clip_patch_embeds_compat(clip, pixel_values)     # (B,N,De)
         B, N, De = patch.shape
