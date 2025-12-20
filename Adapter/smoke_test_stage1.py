@@ -269,7 +269,7 @@ def run_tiny_training(workdir: Path, device: torch.device):
         # CPU 验证默认不启用 amp
     ]
     print("[RUN] tiny training via train_stage1_adapter_alignment.py ...")
-    runpy.run_module("scripts.train_stage1_adapter_alignment", run_name="__main__")
+    runpy.run_module("train", run_name="__main__")
 
     ckpt = out_dir / "stage1_epoch1.pt"
     assert ckpt.exists(), f"Checkpoint not found: {ckpt}"
