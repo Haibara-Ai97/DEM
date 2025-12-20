@@ -252,7 +252,7 @@ def run_tiny_training(workdir: Path, device: torch.device):
 
     # 用 runpy 运行脚本 main，等价于命令行 python scripts/train_stage1_adapter_alignment.py ...
     sys.argv = [
-        "scripts/train_stage1_adapter_alignment.py",
+        "train.py",
         "--train_csv", csv_path,
         "--domain_vocab", vocab_path,
         "--llm_phrase_pt", str(llm_pt),
