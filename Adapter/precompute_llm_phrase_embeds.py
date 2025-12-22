@@ -13,12 +13,15 @@ def main():
     ap.add_argument("--dtype", type=str, default="float16", choices=["float16","bfloat16","float32"])
     args = ap.parse_args()
 
+    # Read the phrase list from the vocabulary file
     phrases = [l.strip() for l in open(args.domain_vocab, "r", encoding="utf-8") if l.strip()]
     assert len(phrases) > 0
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
 
+    # load tokenizer
     tok = AutoTokenizer.from_pretrained(args.llm_name, use_fast=True)
+    # load LLM
     model = AutoModelForCausalLM.from_pretrained(
         args.llm_name,
         torch_dtype=dtype,
@@ -27,6 +30,8 @@ def main():
     )
     W = model.get_input_embeddings().weight.detach()  # (Vocab, d_llm)
 
+    # Compute a vector for each phrase
+    #
     embs = []
     for p in phrases:
         ids = tok(p, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
