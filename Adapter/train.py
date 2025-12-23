@@ -124,6 +124,10 @@ def main():
     ap.add_argument("--disable_dem4", action="store_true")
     ap.add_argument("--disable_dem5", action="store_true")
 
+    ap.add_argument("--encoder_ckpt", type=str, default="", help="Path to pretrained DEM-Encoder checkpoint (.pt/.pth)")
+    ap.add_argument("--encoder_ckpt_key", type=str, default="encoder",
+                    help="State dict key name if checkpoint is a dict")
+
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -151,6 +155,14 @@ def main():
         disable_dem4=args.disable_dem4,
         disable_dem5=args.disable_dem5,
     ).to(device)
+
+    if args.encoder_ckpt:
+        ckpt = torch.load(args.encoder_ckpt, map_location="cpu")
+        state = ckpt
+        if isinstance(ckpt, dict) and args.encoder_ckpt_key int ckpt:
+            state = ckpt[args.encoder_ckpt_key]
+        missing, unexpected = encoder.load_state_dict(state, strict=False)
+        print("[missing encoder]", "missing=", len(missing), "unexpected=", len(unexpected))
 
     if not args.train_encoder:
         encoder.eval()
