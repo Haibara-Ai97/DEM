@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from models.backbone import SimplePyramidBackbone
+from models.backbone import SimplePyramidBackbone, ResNetPyramidBackbone
 from models.da_adapter import DAAdapter, DAAdapterConfig
 from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
 
@@ -98,6 +98,59 @@ def symmetric_infonce(v: torch.Tensor, s: torch.Tensor, temperature: float) -> t
     return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.t(), targets))
 
 
+def load_encoder_ckpt_by_suffix(encoder: torch.nn.Module, ckpt_path: str):
+    import torch
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    # 1) 抽取 state_dict
+    sd = None
+    if isinstance(ckpt, dict):
+        for k in ["state_dict", "model", "net", "ema"]:
+            if k in ckpt and isinstance(ckpt[k], dict):
+                sd = ckpt[k]
+                break
+    if sd is None:
+        sd = ckpt if isinstance(ckpt, dict) else None
+    if sd is None:
+        raise ValueError("Cannot find state_dict in ckpt.")
+
+    # 2) 去掉常见前缀
+    sd = {k.replace("module.", ""): v for k, v in sd.items()}
+
+    msd = encoder.state_dict()
+    loadable = {}
+
+    # 3) 先尝试完全同名
+    for k, v in sd.items():
+        if k in msd and msd[k].shape == v.shape:
+            loadable[k] = v
+
+    # 4) 再做 suffix 匹配（解决 backbone./model.backbone./encoder. 等前缀）
+    if len(loadable) < len(msd) * 0.8:
+        # 建一个 “suffix -> key” 索引（避免 O(N^2) 太慢）
+        # 注意：suffix 长度可按需调，这里用全长 endswith 做即可（key 数量通常不大）
+        for mk in msd.keys():
+            if mk in loadable:
+                continue
+            # 找到一个 ckpt key 使得 ckpt_key.endswith(mk)
+            candidates = [ck for ck in sd.keys() if ck.endswith(mk)]
+            if not candidates:
+                continue
+            # 若有多个候选，选最短的（前缀最少，通常最正确）
+            ck_best = min(candidates, key=len)
+            v = sd[ck_best]
+            if msd[mk].shape == v.shape:
+                loadable[mk] = v
+
+    encoder.load_state_dict(loadable, strict=False)
+
+    print(f"[encoder load] loadable tensors: {len(loadable)}/{len(msd)}")
+    # 你也可以打印缺失 key（可选）
+    # missing = [k for k in msd.keys() if k not in loadable]
+    # print(f"[encoder load] missing={len(missing)}")
+
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache_index_csv", type=str, required=True, help="data/stage1_clip_cache/index.csv")
@@ -128,6 +181,11 @@ def main():
     ap.add_argument("--encoder_ckpt_key", type=str, default="encoder",
                     help="State dict key name if checkpoint is a dict")
 
+    ap.add_argument("--backbone", type=str, default="resnet50",
+                    choices=["resnet50", "simple"])
+    ap.add_argument("--backbone_pretrained", action="store_true",
+                    help="Only used when backbone=resnet50 and no ckpt is loaded")
+
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -146,7 +204,12 @@ def main():
 
     # DEM-Encoder
     enc_cfg = DEMEncoderConfig()
-    pyramid = SimplePyramidBackbone()
+
+    if args.backbone == "resnet50":
+        pyramid = ResNetPyramidBackbone(name="resnet50", pretrained=args.backbone_pretrained)
+    else:
+        pyramid = SimplePyramidBackbone()
+
     encoder = DEMVisionBackbone(
         pyramid_backbone=pyramid,
         cfg=enc_cfg,
@@ -157,12 +220,7 @@ def main():
     ).to(device)
 
     if args.encoder_ckpt:
-        ckpt = torch.load(args.encoder_ckpt, map_location="cpu")
-        state = ckpt
-        if isinstance(ckpt, dict) and args.encoder_ckpt_key in ckpt:
-            state = ckpt[args.encoder_ckpt_key]
-        missing, unexpected = encoder.load_state_dict(state, strict=False)
-        print("[missing encoder]", "missing=", len(missing), "unexpected=", len(unexpected))
+        load_encoder_ckpt_by_suffix(encoder, args.encoder_ckpt)
 
     if not args.train_encoder:
         encoder.eval()
