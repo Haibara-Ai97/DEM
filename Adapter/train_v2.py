@@ -206,7 +206,7 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--win", type=int, default=2)
     # ---- teacher soft targets (Top-N) ----
-    ap.add_argument("--teacher_topk", type=int, default=5, help="Top-N soft target from CLIP cache")
+    ap.add_argument("--teacher_topk", type=int, default=3, help="Top-N soft target from CLIP cache")
     ap.add_argument("--teacher_temperature", type=float, default=0.03, help="Softmax temp for topv -> weights")
 
     # ---- confidence filtering / sampling ----
@@ -353,6 +353,26 @@ def main():
                 idx = window_sample_indices(Hf, Wf, win=args.win, seed=args.seed + global_step).to(device)
                 # ---- build confidence map (from cache topv) and align to V grid ----
                 conf_cache = topv.max(dim=-1).values  # (B,N_cache)
+                if torch.is_tensor(h):
+                    if h.numel() > 1:
+                        # verify same hw within batch
+                        if not torch.all(h == h.flatten()[0]):
+                            raise ValueError(f"Mixed h in one batch: {h}")
+                        h = int(h.flatten()[0].item())
+                    else:
+                        h = int(h.item())
+                else:
+                    h = int(h)
+
+                if torch.is_tensor(w):
+                    if w.numel() > 1:
+                        if not torch.all(w == w.flatten()[0]):
+                            raise ValueError(f"Mixed w in one batch: {w}")
+                        w = int(w.flatten()[0].item())
+                    else:
+                        w = int(w.item())
+                else:
+                    w = int(w)
                 conf_map = conf_cache.reshape(B, 1, h, w)  # (B,1,h,w)
 
                 if V.size(1) != N_cache:
