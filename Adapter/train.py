@@ -220,6 +220,12 @@ def main():
                 V_s = V[:, idx, :].reshape(-1, llm_dim)
                 S_s = S[:, idx, :].reshape(-1, llm_dim)
 
+                with torch.no_grad():
+                    sim = V_s @ S_s.t()
+                    pred = sim.argmax(dim=1)
+                    acc = (pred == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
+                print("diag_top1_acc", acc)
+
                 loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
 
             optim.zero_grad(set_to_none=True)

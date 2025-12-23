@@ -30,6 +30,17 @@ class ImgCsv(Dataset):
         return p, img
 
 
+class ClipCollator:
+    def __init__(self, processor):
+        self.processor = processor
+
+    def __call__(self, batch):
+        paths = [x[0] for x in batch]
+        images = [x[1] for x in batch]
+        pixel_values = processor(images=images, return_tensors="pt")["pixel_values"]
+        return paths, pixel_values
+
+
 @torch.no_grad()
 def clip_patch_embeds_compat(clip, pixel_values):
     # 兼容你环境的旧版 transformers（不传 return_dict）
@@ -47,6 +58,16 @@ def clip_text_embeds(clip, processor, phrases, device):
     enc = processor(text=phrases, return_tensors="pt", padding=True, truncation=True).to(device)
     t = clip.get_text_features(**enc)
     return F.normalize(t, dim=-1)
+
+
+def make_collate_fn(processor):
+    def collate(batch):
+        paths = [x[0] for x in batch]
+        images = [x[1] for x in batch]
+        pixel_values = processor(images=images, return_tensors="pt")["pixel_values"]
+        return paths, pixel_values
+
+    return collate
 
 
 def main():
@@ -70,6 +91,7 @@ def main():
     phrases = [l.strip() for l in open(args.domain_vocab, "r", encoding="utf-8") if l.strip()]
     assert len(phrases) > 0
 
+    # load CLIP & CLIPProcessor
     clip = CLIPModel.from_pretrained(args.clip_name).eval().to(device)
     processor = CLIPProcessor.from_pretrained(args.clip_name)
     for p in clip.parameters():
@@ -78,9 +100,11 @@ def main():
     text = clip_text_embeds(clip, processor, phrases, device)   # (V,De)
 
     ds = ImgCsv(args.train_csv)
+
+    collate_fn = make_collate_fn(processor)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                     num_workers=args.num_workers,
-                    collate_fn=lambda b: ([x[0] for x in b], processor(images=[x[1] for x in b], return_tensors="pt")["pixel_values"]))
+                    collate_fn=ClipCollator(processor))
 
     # 保存一个 index，方便训练阶段读取
     index_rows = []
