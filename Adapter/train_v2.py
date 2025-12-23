@@ -4,6 +4,7 @@ import argparse, os, math, random
 from pathlib import Path
 from collections import OrderedDict
 from typing import List, Tuple
+from tqdm import tqdm
 
 import numpy as np
 from PIL import Image
@@ -201,6 +202,11 @@ def main():
 
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--batch_size", type=int, default=8)
+    # ---- resume / logging ----
+    ap.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume (stage1_cached_epoch*.pt)")
+    ap.add_argument("--resume_strict", action="store_true", help="Use strict=True when loading state_dict")
+    ap.add_argument("--log_every", type=int, default=20, help="Print/refresh metrics every N steps")
+
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--wd", type=float, default=0.01)
     ap.add_argument("--temperature", type=float, default=0.07)
@@ -296,9 +302,66 @@ def main():
         collate_fn=lambda b: collate_cached(b, enc_cfg, args.image_size),
     )
 
+    # -------------------------
+    # Resume support
+    # -------------------------
+    start_epoch = 0
     global_step = 0
-    for epoch in range(args.epochs):
-        for paths, enc_x, topi, topv, (h, w) in dl:
+
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location="cpu")
+
+        # models
+        adapter.load_state_dict(ckpt["adapter"], strict=args.resume_strict)
+        if args.train_encoder:
+            if "encoder" in ckpt:
+                encoder.load_state_dict(ckpt["encoder"], strict=args.resume_strict)
+            else:
+                print("[resume] Warning: args.train_encoder=True but no encoder state in ckpt.")
+
+        # optim/scaler
+        if "optim" in ckpt:
+            optim.load_state_dict(ckpt["optim"])
+        else:
+            print("[resume] Warning: no optim state in ckpt (will NOT truly resume optimizer).")
+
+        if "scaler" in ckpt and ckpt["scaler"] is not None:
+            try:
+                scaler.load_state_dict(ckpt["scaler"])
+            except Exception as e:
+                print(f"[resume] Warning: failed to load scaler state: {e}")
+
+        # epoch/step
+        start_epoch = int(ckpt.get("epoch", 0))  # epoch is "next epoch to run"
+        global_step = int(ckpt.get("global_step", 0))
+
+        # RNG states (optional but recommended)
+        rng = ckpt.get("rng", None)
+        if rng is not None:
+            try:
+                random.setstate(rng["py"])
+                np.random.set_state(rng["np"])
+                torch.set_rng_state(rng["torch"])
+                if torch.cuda.is_available() and ("cuda" in rng) and (rng["cuda"] is not None):
+                    torch.cuda.set_rng_state_all(rng["cuda"])
+            except Exception as e:
+                print(f"[resume] Warning: failed to restore RNG states: {e}")
+
+        print(f"[resume] Loaded {args.resume} (start_epoch={start_epoch}, global_step={global_step})")
+
+        # ensure modes are correct after loading
+        adapter.train()
+        if not args.train_encoder:
+            encoder.eval()
+        else:
+            encoder.train()
+
+    # -------------------------
+    # Training loop
+    # -------------------------
+    for epoch in range(start_epoch, args.epochs):
+        pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{args.epochs}", dynamic_ncols=True)
+        for paths, enc_x, topi, topv, (h, w) in pbar:
             enc_x = enc_x.to(device, non_blocking=True)
             topi = topi.to(device, non_blocking=True)   # (B,N,K)
             topv = topv.to(device, non_blocking=True)   # (B,N,K)
@@ -424,9 +487,20 @@ def main():
 
                 # ---- training loss ----
                 loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
-                if global_step % 20 == 0:
-                    print(f"step={global_step} loss={loss.item():.4f} "
-                          f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}")
+                if global_step % args.log_every == 0:
+                    msg = (f"step={global_step} loss={loss.item():.4f} "
+                           f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} "
+                           f"group={group_correct_acc:.4f} feat={Hf}x{Wf}")
+                    # tqdm friendly
+                    pbar.set_postfix({
+                        "loss": f"{loss.item():.4f}",
+                        "diag": f"{diag_top1_acc:.4f}",
+                        "phrase": f"{phrase_top1_acc:.4f}",
+                        "group": f"{group_correct_acc:.4f}",
+                        "step": global_step
+                    })
+                    # 若你仍想保留文本日志：用 tqdm.write 避免破坏进度条
+                    tqdm.write(msg)
 
             optim.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -435,10 +509,26 @@ def main():
 
             global_step += 1
 
-        ckpt = {"adapter": adapter.state_dict(), "args": vars(args)}
+        ckpt = {
+            "adapter": adapter.state_dict(),
+            "args": vars(args),
+            "optim": optim.state_dict(),
+            "scaler": scaler.state_dict() if args.amp else None,
+            "epoch": epoch + 1,  # next epoch to run
+            "global_step": global_step,
+            "rng": {
+                "py": random.getstate(),
+                "np": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            },
+        }
         if args.train_encoder:
             ckpt["encoder"] = encoder.state_dict()
-        torch.save(ckpt, os.path.join(args.output_dir, f"stage1_cached_epoch{epoch+1}.pt"))
+
+        save_path = os.path.join(args.output_dir, f"stage1_cached_epoch{epoch + 1}.pt")
+        torch.save(ckpt, save_path)
+        print(f"[ckpt] saved: {save_path}")
 
     print(f"Done. Saved to {args.output_dir}")
 
