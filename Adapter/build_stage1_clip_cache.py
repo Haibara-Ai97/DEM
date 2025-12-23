@@ -37,7 +37,7 @@ class ClipCollator:
     def __call__(self, batch):
         paths = [x[0] for x in batch]
         images = [x[1] for x in batch]
-        pixel_values = processor(images=images, return_tensors="pt")["pixel_values"]
+        pixel_values = self.processor(images=images, return_tensors="pt")["pixel_values"]
         return paths, pixel_values
 
 
@@ -101,7 +101,6 @@ def main():
 
     ds = ImgCsv(args.train_csv)
 
-    collate_fn = make_collate_fn(processor)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                     num_workers=args.num_workers,
                     collate_fn=ClipCollator(processor))
