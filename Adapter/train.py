@@ -268,14 +268,14 @@ def main():
             N_cache = h * w
 
             # feat: (B,C,H,W)
-            print("feat std(all) =", feat.float().std().item())
-            print("feat std(spatial avg) =", feat.float().flatten(2).std(dim=2).mean().item())  # 每个样本在空间维度的方差
+            # print("feat std(all) =", feat.float().std().item())
+            # print("feat std(spatial avg) =", feat.float().flatten(2).std(dim=2).mean().item())  # 每个样本在空间维度的方差
 
             # Adapter -> V (B,Nv,d)
             with torch.cuda.amp.autocast(enabled=(args.amp and device.type == "cuda")):
                 V = adapter(feat)
-                print("V token std =", V.float().std(dim=1).mean().item())  # token 维度方差（关键）
-                print("V batch std =", V.float().std(dim=0).mean().item())
+                # print("V token std =", V.float().std(dim=1).mean().item())  # token 维度方差（关键）
+                # print("V batch std =", V.float().std(dim=0).mean().item())
                 V = F.normalize(V, dim=-1)
 
                 # build S from cached topi/topv
@@ -296,30 +296,36 @@ def main():
                 V_s = V[:, idx, :].reshape(-1, llm_dim)
                 S_s = S[:, idx, :].reshape(-1, llm_dim)
 
+                # with torch.no_grad():
+                #     sim = (V_s.float() @ S_s.float().t())  # 强制 fp32，避免 AMP 下精度导致 tie
+                #     pred = sim.argmax(dim=1)
+                #     print("pred unique:", pred.unique()[:10], "num_unique:", pred.unique().numel())
+                #     print("pred head:", pred[:20].tolist())
+                #     row_span = (sim.max(dim=1).values - sim.min(dim=1).values)
+                #     print("sim row span mean:", row_span.mean().item(), "min:", row_span.min().item())
+
+                # with torch.no_grad():
+                #     Vn = F.normalize(V_s.float(), dim=-1)
+                #     Sn = F.normalize(S_s.float(), dim=-1)
+                #
+                #     # (A) 向量集中程度：mean norm 越接近 1，越塌缩
+                #     print("||mean(V)||=", Vn.mean(0).norm().item(), "||mean(S)||=", Sn.mean(0).norm().item())
+                #
+                #     # (B) token 间相似度：越接近 1 越塌缩/过平
+                #     print("V mutual sim mean=", (Vn @ Vn.t()).mean().item())
+                #     print("S mutual sim mean=", (Sn @ Sn.t()).mean().item())
+                #
+                #     # (C) 看哪个列是 hub
+                #     sim = Vn @ Sn.t()
+                #     col_mean = sim.mean(0)
+                #     top_vals, top_idx = col_mean.topk(5)
+                #     print("hub cols(top5)=", list(zip(top_idx.tolist(), top_vals.tolist())))
+
                 with torch.no_grad():
-                    sim = (V_s.float() @ S_s.float().t())  # 强制 fp32，避免 AMP 下精度导致 tie
+                    sim = V_s @ S_s.t()
                     pred = sim.argmax(dim=1)
-                    print("pred unique:", pred.unique()[:10], "num_unique:", pred.unique().numel())
-                    print("pred head:", pred[:20].tolist())
-                    row_span = (sim.max(dim=1).values - sim.min(dim=1).values)
-                    print("sim row span mean:", row_span.mean().item(), "min:", row_span.min().item())
-
-                with torch.no_grad():
-                    Vn = F.normalize(V_s.float(), dim=-1)
-                    Sn = F.normalize(S_s.float(), dim=-1)
-
-                    # (A) 向量集中程度：mean norm 越接近 1，越塌缩
-                    print("||mean(V)||=", Vn.mean(0).norm().item(), "||mean(S)||=", Sn.mean(0).norm().item())
-
-                    # (B) token 间相似度：越接近 1 越塌缩/过平
-                    print("V mutual sim mean=", (Vn @ Vn.t()).mean().item())
-                    print("S mutual sim mean=", (Sn @ Sn.t()).mean().item())
-
-                    # (C) 看哪个列是 hub
-                    sim = Vn @ Sn.t()
-                    col_mean = sim.mean(0)
-                    top_vals, top_idx = col_mean.topk(5)
-                    print("hub cols(top5)=", list(zip(top_idx.tolist(), top_vals.tolist())))
+                    acc = (pred == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
+                print("diag_top1_acc=", acc)
 
                 loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
 
