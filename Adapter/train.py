@@ -221,10 +221,12 @@ def main():
                 S_s = S[:, idx, :].reshape(-1, llm_dim)
 
                 with torch.no_grad():
-                    sim = V_s @ S_s.t()
+                    sim = (V_s.float() @ S_s.float().t())  # 强制 fp32，避免 AMP 下精度导致 tie
                     pred = sim.argmax(dim=1)
-                    acc = (pred == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
-                print("diag_top1_acc", acc)
+                    print("pred unique:", pred.unique()[:10], "num_unique:", pred.unique().numel())
+                    print("pred head:", pred[:20].tolist())
+                    row_span = (sim.max(dim=1).values - sim.min(dim=1).values)
+                    print("sim row span mean:", row_span.mean().item(), "min:", row_span.min().item())
 
                 loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
 
