@@ -278,11 +278,8 @@ def main():
                 # print("V batch std =", V.float().std(dim=0).mean().item())
                 V = F.normalize(V, dim=-1)
 
-                # build S from cached topi/topv
-                # topi/topv are on cache grid (N_cache)
-                w_soft = F.softmax(topv, dim=-1)         # (B,N_cache,K)
-                s_k = llm_phrase[topi]                   # (B,N_cache,K,d)
-                S = llm_phrase[topi[..., 0]] # (B,N_cache,d)
+                # build S from cached topi/topv (cache grid: N_cache=h*w)
+                S = llm_phrase[topi[..., 0]]  # (B, N_cache, d)
                 S = F.normalize(S, dim=-1)
 
                 # if V grid differs from cache grid, up/down sample S to match V token count
@@ -293,40 +290,47 @@ def main():
                     S = F.normalize(S, dim=-1)
 
                 idx = window_sample_indices(Hf, Wf, win=args.win, seed=args.seed + global_step).to(device)
-                V_s = V[:, idx, :].reshape(-1, llm_dim)
-                S_s = S[:, idx, :].reshape(-1, llm_dim)
+                V_s = V[:, idx, :].reshape(-1, llm_dim)  # (M,d)
+                S_s = S[:, idx, :].reshape(-1, llm_dim)  # (M,d)
 
-                # with torch.no_grad():
-                #     sim = (V_s.float() @ S_s.float().t())  # 强制 fp32，避免 AMP 下精度导致 tie
-                #     pred = sim.argmax(dim=1)
-                #     print("pred unique:", pred.unique()[:10], "num_unique:", pred.unique().numel())
-                #     print("pred head:", pred[:20].tolist())
-                #     row_span = (sim.max(dim=1).values - sim.min(dim=1).values)
-                #     print("sim row span mean:", row_span.mean().item(), "min:", row_span.min().item())
+                # ---- centerize + normalize (reduce hubness / anisotropy) ----
+                V_s = V_s - V_s.mean(dim=0, keepdim=True)
+                S_s = S_s - S_s.mean(dim=0, keepdim=True)
+                V_s = F.normalize(V_s, dim=-1)
+                S_s = F.normalize(S_s, dim=-1)
 
-                # with torch.no_grad():
-                #     Vn = F.normalize(V_s.float(), dim=-1)
-                #     Sn = F.normalize(S_s.float(), dim=-1)
-                #
-                #     # (A) 向量集中程度：mean norm 越接近 1，越塌缩
-                #     print("||mean(V)||=", Vn.mean(0).norm().item(), "||mean(S)||=", Sn.mean(0).norm().item())
-                #
-                #     # (B) token 间相似度：越接近 1 越塌缩/过平
-                #     print("V mutual sim mean=", (Vn @ Vn.t()).mean().item())
-                #     print("S mutual sim mean=", (Sn @ Sn.t()).mean().item())
-                #
-                #     # (C) 看哪个列是 hub
-                #     sim = Vn @ Sn.t()
-                #     col_mean = sim.mean(0)
-                #     top_vals, top_idx = col_mean.topk(5)
-                #     print("hub cols(top5)=", list(zip(top_idx.tolist(), top_vals.tolist())))
-
+                # ---- metrics in fp32 (disable autocast) ----
                 with torch.no_grad():
-                    sim = V_s @ S_s.t()
-                    pred = sim.argmax(dim=1)
-                    acc = (pred == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
-                print("diag_top1_acc=", acc)
+                    with torch.cuda.amp.autocast(enabled=False):
+                        Vn = V_s.float()
+                        Sn = S_s.float()
 
+                        # (1) strict diagonal top-1 (in-batch)
+                        sim = Vn @ Sn.t()
+                        pred_inbatch = sim.argmax(dim=1)
+                        diag_top1_acc = (
+                                    pred_inbatch == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
+
+                        # (2) phrase-level 38-way top-1 acc (更稳定、更符合你任务)
+                        # 只有在 token 与 cache grid 一致时才有离散标签（你现在通常 align_to_cache_grid=True，因此成立）
+                        phrase_top1_acc = -1.0
+                        if V.size(1) == topi.size(1):
+                            y = topi[:, idx, 0].reshape(-1)  # (M,)
+                            sim_phrase = Vn @ llm_phrase.float().t()  # (M, Vocab=38)
+                            pred_phrase = sim_phrase.argmax(dim=1)
+                            phrase_top1_acc = (pred_phrase == y).float().mean().item()
+
+                        # (3) group-correct acc: 允许命中同类 token（缓解“对角线过苛刻”的低估）
+                        group_correct_acc = -1.0
+                        if V.size(1) == topi.size(1):
+                            y = topi[:, idx, 0].reshape(-1)
+                            group_correct_acc = (y[pred_inbatch] == y).float().mean().item()
+
+                if global_step % 20 == 0:
+                    print(f"step={global_step} loss={loss.item():.4f} "
+                          f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}")
+
+                # ---- training loss ----
                 loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
 
             optim.zero_grad(set_to_none=True)
@@ -335,8 +339,6 @@ def main():
             scaler.update()
 
             global_step += 1
-            if global_step % 20 == 0:
-                print(f"step={global_step} loss={loss.item():.4f} feat={Hf}x{Wf}")
 
         ckpt = {"adapter": adapter.state_dict(), "args": vars(args)}
         if args.train_encoder:
