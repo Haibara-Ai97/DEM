@@ -282,7 +282,7 @@ def main():
                 # topi/topv are on cache grid (N_cache)
                 w_soft = F.softmax(topv, dim=-1)         # (B,N_cache,K)
                 s_k = llm_phrase[topi]                   # (B,N_cache,K,d)
-                S = (w_soft.unsqueeze(-1) * s_k).sum(dim=-2)  # (B,N_cache,d)
+                S = llm_phrase[topi[..., 0]] # (B,N_cache,d)
                 S = F.normalize(S, dim=-1)
 
                 # if V grid differs from cache grid, up/down sample S to match V token count
