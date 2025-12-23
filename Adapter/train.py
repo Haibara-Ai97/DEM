@@ -326,12 +326,11 @@ def main():
                             y = topi[:, idx, 0].reshape(-1)
                             group_correct_acc = (y[pred_inbatch] == y).float().mean().item()
 
+                # ---- training loss ----
+                loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
                 if global_step % 20 == 0:
                     print(f"step={global_step} loss={loss.item():.4f} "
                           f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}")
-
-                # ---- training loss ----
-                loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
 
             optim.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
