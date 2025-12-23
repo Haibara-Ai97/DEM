@@ -336,11 +336,11 @@ def main():
 
                 # weights: softmax(topv / tau)
                 w_logits = topv[..., :K] / max(args.teacher_temperature, 1e-6)  # (B,N_cache,K)
-                w = F.softmax(w_logits, dim=-1)  # (B,N_cache,K)
+                w_soft = F.softmax(w_logits, dim=-1)  # (B,N_cache,K)
 
                 # phrase embeds: (B,N_cache,K,d)
                 P = llm_phrase[topi[..., :K]]
-                S = (w.unsqueeze(-1) * P).sum(dim=-2)  # (B,N_cache,d)
+                S = (w_soft.unsqueeze(-1) * P).sum(dim=-2)  # (B,N_cache,d)
                 S = F.normalize(S, dim=-1)
 
                 # if V grid differs from cache grid, up/down sample S to match V token count
@@ -353,26 +353,6 @@ def main():
                 idx = window_sample_indices(Hf, Wf, win=args.win, seed=args.seed + global_step).to(device)
                 # ---- build confidence map (from cache topv) and align to V grid ----
                 conf_cache = topv.max(dim=-1).values  # (B,N_cache)
-                if torch.is_tensor(h):
-                    if h.numel() > 1:
-                        # verify same hw within batch
-                        if not torch.all(h == h.flatten()[0]):
-                            raise ValueError(f"Mixed h in one batch: {h}")
-                        h = int(h.flatten()[0].item())
-                    else:
-                        h = int(h.item())
-                else:
-                    h = int(h)
-
-                if torch.is_tensor(w):
-                    if w.numel() > 1:
-                        if not torch.all(w == w.flatten()[0]):
-                            raise ValueError(f"Mixed w in one batch: {w}")
-                        w = int(w.flatten()[0].item())
-                    else:
-                        w = int(w.item())
-                else:
-                    w = int(w)
                 conf_map = conf_cache.reshape(B, 1, h, w)  # (B,1,h,w)
 
                 if V.size(1) != N_cache:
