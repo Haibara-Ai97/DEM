@@ -16,7 +16,6 @@ from tqdm import tqdm
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-
 class ImgCsv(Dataset):
     def __init__(self, csv_path):
         df = pd.read_csv(csv_path)
@@ -93,7 +92,7 @@ def main():
 
     # load CLIP & CLIPProcessor
     clip = CLIPModel.from_pretrained(args.clip_name).eval().to(device)
-    processor = CLIPProcessor.from_pretrained(args.clip_name)
+    processor = CLIPProcessor.from_pretrained(args.clip_name, use_fast=True)
     for p in clip.parameters():
         p.requires_grad = False
 
