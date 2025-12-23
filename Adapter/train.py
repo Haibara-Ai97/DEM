@@ -159,7 +159,7 @@ def main():
     if args.encoder_ckpt:
         ckpt = torch.load(args.encoder_ckpt, map_location="cpu")
         state = ckpt
-        if isinstance(ckpt, dict) and args.encoder_ckpt_key int ckpt:
+        if isinstance(ckpt, dict) and args.encoder_ckpt_key in ckpt:
             state = ckpt[args.encoder_ckpt_key]
         missing, unexpected = encoder.load_state_dict(state, strict=False)
         print("[missing encoder]", "missing=", len(missing), "unexpected=", len(unexpected))
