@@ -197,9 +197,15 @@ def main():
             B, C, Hf, Wf = feat.shape
             N_cache = h * w
 
+            # feat: (B,C,H,W)
+            print("feat std(all) =", feat.float().std().item())
+            print("feat std(spatial avg) =", feat.float().flatten(2).std(dim=2).mean().item())  # 每个样本在空间维度的方差
+
             # Adapter -> V (B,Nv,d)
             with torch.cuda.amp.autocast(enabled=(args.amp and device.type == "cuda")):
-                V = adapter(feat)                        # (B, Hf*Wf, d)
+                V = adapter(feat)
+                print("V token std =", V.float().std(dim=1).mean().item())  # token 维度方差（关键）
+                print("V batch std =", V.float().std(dim=0).mean().item())
                 V = F.normalize(V, dim=-1)
 
                 # build S from cached topi/topv
@@ -219,6 +225,14 @@ def main():
                 idx = window_sample_indices(Hf, Wf, win=args.win, seed=args.seed + global_step).to(device)
                 V_s = V[:, idx, :].reshape(-1, llm_dim)
                 S_s = S[:, idx, :].reshape(-1, llm_dim)
+
+                with torch.no_grad():
+                    sim = (V_s.float() @ S_s.float().t())  # 强制 fp32，避免 AMP 下精度导致 tie
+                    pred = sim.argmax(dim=1)
+                    print("pred unique:", pred.unique()[:10], "num_unique:", pred.unique().numel())
+                    print("pred head:", pred[:20].tolist())
+                    row_span = (sim.max(dim=1).values - sim.min(dim=1).values)
+                    print("sim row span mean:", row_span.mean().item(), "min:", row_span.min().item())
 
                 with torch.no_grad():
                     Vn = F.normalize(V_s.float(), dim=-1)
