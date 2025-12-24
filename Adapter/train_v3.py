@@ -383,7 +383,7 @@ def main():
     global_step = 0
 
     if args.resume:
-        ckpt = torch.load(args.resume, map_location="cpu")
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
 
         # ---- model states ----
         if "adapter" in ckpt:
