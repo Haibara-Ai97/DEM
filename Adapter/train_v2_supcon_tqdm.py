@@ -48,9 +48,9 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     return t
 
 
-def normalize(t: torch.Tensor, mean: Tuple[float, float, float], std: Tuple[float, float, float]) -> torch.Tensor:
-    m = torch.tensor(mean, dtype=t.dtype).view(3, 1, 1)
-    s = torch.tensor(std, dtype=t.dtype).view(3, 1, 1)
+def normalize(t: torch.Tensor, mean: Tuple[float,float,float], std: Tuple[float,float,float]) -> torch.Tensor:
+    m = torch.tensor(mean, dtype=t.dtype).view(3,1,1)
+    s = torch.tensor(std, dtype=t.dtype).view(3,1,1)
     return (t - m) / s
 
 
@@ -64,10 +64,9 @@ def collate_cached(batch, enc_cfg: DEMEncoderConfig, image_size: int):
     topi_list, topv_list, hw_list = [], [], []
     for cp in cache_paths:
         z = np.load(cp)
-        topi_list.append(torch.from_numpy(z["topi"]).long())  # (N,K)
-        topv_list.append(torch.from_numpy(z["topv"]).float())  # (N,K)
-        h = int(z["h"]);
-        w = int(z["w"])
+        topi_list.append(torch.from_numpy(z["topi"]).long())      # (N,K)
+        topv_list.append(torch.from_numpy(z["topv"]).float())     # (N,K)
+        h = int(z["h"]); w = int(z["w"])
         hw_list.append((h, w))
 
     # 假设本 batch 的 CLIP grid 一致（同一个 CLIP 模型通常一致，例如 14x14）
@@ -102,11 +101,11 @@ def symmetric_infonce(v: torch.Tensor, s: torch.Tensor, temperature: float) -> t
 
 
 def supervised_xmodal_contrastive(
-        v: torch.Tensor,
-        s: torch.Tensor,
-        y: torch.Tensor,
-        temperature: float,
-        chunk_size: int = 0,
+    v: torch.Tensor,
+    s: torch.Tensor,
+    y: torch.Tensor,
+    temperature: float,
+    chunk_size: int = 0,
 ) -> torch.Tensor:
     """Multi-positive cross-modal contrastive loss (SupCon-style).
 
@@ -255,6 +254,7 @@ def load_encoder_ckpt_by_suffix(encoder: torch.nn.Module, ckpt_path: str):
     # print(f"[encoder load] missing={len(missing)}")
 
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache_index_csv", type=str, required=True, help="data/stage1_clip_cache/index.csv")
@@ -288,7 +288,7 @@ def main():
                     help="How to pick one token per window")
 
     ap.add_argument("--image_size", type=int, default=224)
-    ap.add_argument("--feat_key", type=str, default="0", choices=["0", "1", "2", "3"])
+    ap.add_argument("--feat_key", type=str, default="0", choices=["0","1","2","3"])
     ap.add_argument("--align_to_cache_grid", action="store_true", help="把 encoder 特征插值到 cache 的 h,w")
     ap.add_argument("--train_encoder", action="store_true")
     ap.add_argument("--amp", action="store_true")
@@ -322,7 +322,7 @@ def main():
 
     payload = torch.load(args.llm_phrase_pt, map_location="cpu")
     assert payload["phrases"] == vocab, "domain_vocab.txt 与 llm_phrase_embeds.pt 的短语顺序不一致，请重新预计算。"
-    llm_phrase = F.normalize(payload["embeds"].to(device), dim=-1)  # (V,d_llm)
+    llm_phrase = F.normalize(payload["embeds"].to(device), dim=-1)   # (V,d_llm)
     llm_dim = llm_phrase.size(-1)
 
     # DEM-Encoder
@@ -369,7 +369,7 @@ def main():
 
     global_step = 0
     for epoch in range(args.epochs):
-        pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{args.epochs}", dynamic_ncols=True)
+        pbar = tqdm(dl, desc=f"Epoch {epoch+1}/{args.epochs}", dynamic_ncols=True)
         # epoch running stats (averaged over batches)
         ep_loss_sum = 0.0
         ep_diag_sum = 0.0
@@ -380,8 +380,8 @@ def main():
         ep_group_n = 0
         for paths, enc_x, topi, topv, (h, w) in pbar:
             enc_x = enc_x.to(device, non_blocking=True)
-            topi = topi.to(device, non_blocking=True)  # (B,N,K)
-            topv = topv.to(device, non_blocking=True)  # (B,N,K)
+            topi = topi.to(device, non_blocking=True)   # (B,N,K)
+            topv = topv.to(device, non_blocking=True)   # (B,N,K)
 
             # DataLoader collate may stack h/w into tensors; convert to python ints
             if torch.is_tensor(h):
@@ -411,7 +411,7 @@ def main():
                 with torch.no_grad():
                     feats: OrderedDict = encoder(enc_x)
 
-            feat = feats[args.feat_key]  # (B,C,Hf,Wf)
+            feat = feats[args.feat_key]                  # (B,C,Hf,Wf)
 
             # align to cache grid (h,w)
             if args.align_to_cache_grid:
@@ -446,9 +446,9 @@ def main():
 
                 # if V grid differs from cache grid, up/down sample S to match V token count
                 if V.size(1) != S.size(1):
-                    Sd = S.transpose(1, 2).reshape(B, llm_dim, h, w)
+                    Sd = S.transpose(1,2).reshape(B, llm_dim, h, w)
                     Sd = F.interpolate(Sd, size=(Hf, Wf), mode="bilinear", align_corners=False)
-                    S = Sd.flatten(2).transpose(1, 2).contiguous()
+                    S = Sd.flatten(2).transpose(1,2).contiguous()
                     S = F.normalize(S, dim=-1)
                 # ---- build confidence map (from cache topv) and align to V grid ----
                 conf_cache = topv.max(dim=-1).values  # (B,N_cache)
@@ -509,7 +509,7 @@ def main():
                         sim = Vn @ Sn.t()
                         pred_inbatch = sim.argmax(dim=1)
                         diag_top1_acc = (
-                                pred_inbatch == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
+                                    pred_inbatch == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
 
                         # (2) phrase-level 38-way top-1 acc (更稳定、更符合你任务)
                         # 只有在 token 与 cache grid 一致时才有离散标签（你现在通常 align_to_cache_grid=True，因此成立）
@@ -533,14 +533,14 @@ def main():
                                                              chunk_size=args.supcon_chunk)
                     elif args.loss_type == "mix" and (y_train is not None):
                         loss_sup = supervised_xmodal_contrastive(V_fp, S_fp, y_train, temperature=args.temperature,
-                                                                 chunk_size=args.supcon_chunk)
+                                                                chunk_size=args.supcon_chunk)
                         loss_inf = symmetric_infonce(V_fp, S_fp, temperature=args.temperature)
                         w = float(args.supcon_weight)
                         loss = w * loss_sup + (1.0 - w) * loss_inf
                     else:
                         # fallback: diagonal InfoNCE
                         loss = symmetric_infonce(V_fp, S_fp, temperature=args.temperature)
-
+                
                 # ---- accumulate epoch stats ----
                 ep_loss_sum += float(loss.item())
                 ep_diag_sum += float(diag_top1_acc)
@@ -569,6 +569,7 @@ def main():
                         f"phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}"
                     )
 
+
             optim.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(optim)
@@ -576,19 +577,20 @@ def main():
 
             global_step += 1
 
+        
         # ---- epoch summary ----
         avg_loss = ep_loss_sum / max(ep_n, 1)
         avg_diag = ep_diag_sum / max(ep_n, 1)
         avg_phrase = (ep_phrase_sum / ep_phrase_n) if ep_phrase_n > 0 else -1.0
         avg_group = (ep_group_sum / ep_group_n) if ep_group_n > 0 else -1.0
         tqdm.write(
-            f"[epoch {epoch + 1}/{args.epochs}] loss={avg_loss:.4f} diag={avg_diag:.4f} "
+            f"[epoch {epoch+1}/{args.epochs}] loss={avg_loss:.4f} diag={avg_diag:.4f} "
             f"phrase={avg_phrase:.4f} group={avg_group:.4f}"
         )
         ckpt = {"adapter": adapter.state_dict(), "args": vars(args)}
         if args.train_encoder:
             ckpt["encoder"] = encoder.state_dict()
-        torch.save(ckpt, os.path.join(args.output_dir, f"stage1_cached_epoch{epoch + 1}.pt"))
+        torch.save(ckpt, os.path.join(args.output_dir, f"stage1_cached_epoch{epoch+1}.pt"))
 
     print(f"Done. Saved to {args.output_dir}")
 
