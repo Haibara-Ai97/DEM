@@ -1,12 +1,17 @@
 # scripts/train_stage1_adapter_alignment_cached.py
 from __future__ import annotations
-import argparse, os, math, random, re
+import argparse, os, math, random, re, atexit
 from pathlib import Path
 from collections import OrderedDict
 from typing import List, Tuple
 
 import numpy as np
 from PIL import Image
+import time
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -326,6 +331,56 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # -------------------------
+    # Logging setup (text log + jsonl metrics)
+    # -------------------------
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log_path = out_dir / f"train_{run_id}.log"
+    jsonl_path = out_dir / f"metrics_{run_id}.jsonl"
+
+    logger = logging.getLogger("train_v3")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    _fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    _fh = logging.FileHandler(log_path, encoding="utf-8")
+    _fh.setLevel(logging.INFO)
+    _fh.setFormatter(_fmt)
+    logger.addHandler(_fh)
+
+    _sh = logging.StreamHandler()
+    _sh.setLevel(logging.INFO)
+    _sh.setFormatter(_fmt)
+    logger.addHandler(_sh)
+
+    jsonl_f = open(jsonl_path, "a", encoding="utf-8", buffering=1)
+
+    def log_json(obj: dict):
+        obj["ts"] = datetime.now().isoformat(timespec="seconds")
+        jsonl_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    # ensure the handle is closed on normal exit
+    atexit.register(lambda: jsonl_f.close())
+
+    logger.info(f"run_id={run_id}")
+    logger.info(f"log_path={log_path}")
+    logger.info(f"jsonl_path={jsonl_path}")
+    logger.info("args=" + json.dumps(vars(args), ensure_ascii=False))
+
+    # minimal environment info
+    try:
+        logger.info(f"torch={torch.__version__} cuda_available={torch.cuda.is_available()} device={device}")
+        if torch.cuda.is_available():
+            logger.info(f"gpu={torch.cuda.get_device_name(0)}")
+    except Exception as _e:
+        logger.info(f"env_log_failed: {_e}")
+
+    log_json({"event": "run_start", "run_id": run_id, "device": str(device)})
+
     # domain vocab（用于顺序一致性检查）
     vocab = [l.strip() for l in open(args.domain_vocab, "r", encoding="utf-8") if l.strip()]
 
@@ -437,6 +492,22 @@ def main():
 
         print(f"[resume] Loaded {args.resume} (start_epoch={start_epoch}, global_step={global_step})")
 
+        try:
+            logger.info(
+                f"[resume] path={args.resume} start_epoch={start_epoch} global_step={global_step} "
+                f"reset_optimizer={args.reset_optimizer} reset_rng={args.reset_rng}"
+            )
+            log_json({
+                "event": "resume",
+                "path": args.resume,
+                "start_epoch": int(start_epoch),
+                "global_step": int(global_step),
+                "reset_optimizer": bool(args.reset_optimizer),
+                "reset_rng": bool(args.reset_rng),
+            })
+        except Exception as _e:
+            print(f"[resume] log failed: {_e}")
+
         # ensure modes are correct after loading
         adapter.train()
         if args.train_encoder:
@@ -450,6 +521,8 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{args.epochs}", dynamic_ncols=True)
         # epoch running stats (averaged over batches)
+        epoch_t0 = time.time()
+        ep_skips = 0
         ep_loss_sum = 0.0
         ep_diag_sum = 0.0
         ep_phrase_sum = 0.0
@@ -568,7 +641,29 @@ def main():
                     y_train = topi[..., 0].gather(1, idx_batch).reshape(-1)[keep]  # (M',)
 
                 # if too few tokens remain, skip this step (avoid degenerate CE)
+
                 if V_s.size(0) < args.min_tokens:
+                    ep_skips += 1
+                    if global_step % args.log_every == 0:
+                        kept_tokens = int(V_s.size(0))
+                        total_tokens = int(V_sel.numel() // llm_dim)
+                        lr_now = float(optim.param_groups[0]["lr"]) if len(optim.param_groups) else None
+                        try:
+                            logger.info(
+                                f"step={global_step} SKIP kept_tokens={kept_tokens} total_tokens={total_tokens} "
+                                f"min_tokens={args.min_tokens} lr={lr_now}"
+                            )
+                            log_json({
+                                "event": "skip",
+                                "epoch": int(epoch),
+                                "step": int(global_step),
+                                "kept_tokens": kept_tokens,
+                                "total_tokens": total_tokens,
+                                "min_tokens": int(args.min_tokens),
+                                "lr": lr_now,
+                            })
+                        except Exception:
+                            pass
                     global_step += 1
                     continue
 
@@ -630,6 +725,7 @@ def main():
                 if group_correct_acc >= 0:
                     ep_group_sum += float(group_correct_acc)
                     ep_group_n += 1
+
                 if global_step % args.log_every == 0:
                     # update tqdm postfix with running epoch averages
                     avg_loss = ep_loss_sum / max(ep_n, 1)
@@ -648,6 +744,34 @@ def main():
                         f"phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}"
                     )
 
+                    kept_tokens = int(V_s.size(0))
+                    total_tokens = int(V_sel.numel() // llm_dim)
+                    lr_now = float(optim.param_groups[0]["lr"]) if len(optim.param_groups) else None
+                    try:
+                        logger.info(
+                            f"step={global_step} loss={loss.item():.4f} diag={diag_top1_acc:.4f} "
+                            f"phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} "
+                            f"kept={kept_tokens}/{total_tokens} lr={lr_now}"
+                        )
+                        log_json({
+                            "event": "step",
+                            "epoch": int(epoch),
+                            "step": int(global_step),
+                            "lr": lr_now,
+                            "loss": float(loss.item()),
+                            "diag": float(diag_top1_acc),
+                            "phrase": float(phrase_top1_acc),
+                            "group": float(group_correct_acc),
+                            "avg_loss": float(avg_loss),
+                            "avg_diag": float(avg_diag),
+                            "avg_phrase": float(avg_phrase),
+                            "avg_group": float(avg_group),
+                            "kept_tokens": kept_tokens,
+                            "total_tokens": total_tokens,
+                        })
+                    except Exception:
+                        pass
+
             optim.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(optim)
@@ -655,15 +779,35 @@ def main():
 
             global_step += 1
 
+
         # ---- epoch summary ----
+        epoch_sec = time.time() - epoch_t0
         avg_loss = ep_loss_sum / max(ep_n, 1)
         avg_diag = ep_diag_sum / max(ep_n, 1)
         avg_phrase = (ep_phrase_sum / ep_phrase_n) if ep_phrase_n > 0 else -1.0
         avg_group = (ep_group_sum / ep_group_n) if ep_group_n > 0 else -1.0
-        tqdm.write(
-            f"[epoch {epoch + 1}/{args.epochs}] loss={avg_loss:.4f} diag={avg_diag:.4f} "
-            f"phrase={avg_phrase:.4f} group={avg_group:.4f}"
+        msg = (
+            f"[epoch {epoch + 1}/{args.epochs}] "
+            f"loss={avg_loss:.4f} diag={avg_diag:.4f} "
+            f"phrase={avg_phrase:.4f} group={avg_group:.4f} "
+            f"skips={ep_skips} time_sec={epoch_sec:.1f}"
         )
+        tqdm.write(msg)
+        try:
+            logger.info(msg)
+            log_json({
+                "event": "epoch_end",
+                "epoch": int(epoch),
+                "avg_loss": float(avg_loss),
+                "avg_diag": float(avg_diag),
+                "avg_phrase": float(avg_phrase),
+                "avg_group": float(avg_group),
+                "skips": int(ep_skips),
+                "time_sec": float(epoch_sec),
+            })
+        except Exception:
+            pass
+
         ckpt = {
             "adapter": adapter.state_dict(),
             "args": vars(args),
@@ -685,6 +829,18 @@ def main():
         torch.save(ckpt, save_path)
         print(f"[ckpt] saved: {save_path}")
 
+        try:
+            logger.info(f"[ckpt] saved: {save_path}")
+            log_json({"event": "ckpt", "epoch": int(epoch), "path": str(save_path)})
+        except Exception:
+            pass
+
+
+    try:
+        jsonl_f.flush()
+        jsonl_f.close()
+    except Exception:
+        pass
     print(f"Done. Saved to {args.output_dir}")
 
 
