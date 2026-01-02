@@ -218,6 +218,44 @@ class VisionPrefixQwen(nn.Module):
         return out
 
 
+def load_encoder_ckpt(encoder: torch.nn.Module, ckpt_path: str, key: str = "encoder"):
+    import torch
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    sd = None
+
+    if isinstance(ckpt, dict):
+        # 优先用显式 key（与你 stage1 的 encoder_ckpt_key 对齐）
+        if key in ckpt and isinstance(ckpt[key], dict):
+            sd = ckpt[key]
+        else:
+            # 常见包装
+            for k in ["state_dict", "model", "net", "ema"]:
+                if k in ckpt and isinstance(ckpt[k], dict):
+                    sd = ckpt[k]
+                    break
+            # 如果 dict 本身就是 state_dict
+            if sd is None and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
+                sd = ckpt
+
+    if sd is None:
+        raise ValueError(f"Cannot find a usable state_dict in encoder_ckpt: {ckpt_path}")
+
+    # 去掉常见前缀（尽量最小但实用）
+    def strip_prefix_if_present(state_dict, prefix):
+        keys = list(state_dict.keys())
+        hit = sum(1 for k in keys if k.startswith(prefix))
+        if hit >= max(1, int(0.5 * len(keys))):  # 半数以上带前缀才剥离
+            return {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
+        return state_dict
+
+    for pref in ["module.", "encoder.", "model.encoder."]:
+        sd = strip_prefix_if_present(sd, pref)
+
+    missing, unexpected = encoder.load_state_dict(sd, strict=False)
+    print(f"[encoder load] missing={len(missing)}, unexpected={len(unexpected)}")
+
+
 def main():
     ap = argparse.ArgumentParser()
 
@@ -262,6 +300,15 @@ def main():
 
     ap.add_argument("--freeze_llm", action="store_true",
                     help="Freeze base LLM params (useful when not using LoRA).")
+
+    ap.add_argument("--encoder_ckpt", type=str, default="",
+                    help="Path to pretrained DEM-Encoder checkpoint used in stage1")
+    ap.add_argument("--encoder_ckpt_key", type=str, default="encoder",
+                    help="Key name for encoder state dict if ckpt is a dict")
+    ap.add_argument("--disable_dem2", action="store_true")
+    ap.add_argument("--disable_dem3", action="store_true")
+    ap.add_argument("--disable_dem4", action="store_true")
+    ap.add_argument("--disable_dem5", action="store_true")
 
     args = ap.parse_args()
 
@@ -309,7 +356,14 @@ def main():
     # Vision: DEM-Encoder
     enc_cfg = DEMEncoderConfig()
     pyramid = ResNetPyramidBackbone(name="resnet50", pretrained=args.backbone_pretrained)
-    encoder = DEMVisionBackbone(pyramid_backbone=pyramid, cfg=enc_cfg).to(device)
+    encoder = DEMVisionBackbone(pyramid_backbone=pyramid, cfg=enc_cfg,
+                                disable_dem2=args.disable_dem2,
+                                disable_dem3=args.disable_dem3,
+                                disable_dem4=args.disable_dem4,
+                                disable_dem5=args.disable_dem5).to(device)
+
+    if args.encoder_ckpt:
+        load_encoder_ckpt(encoder, args.encoder_ckpt, key=args.encoder_ckpt_key)
 
     # Adapter: load from Stage-1
     # Stage-1 adapter dim = LLM embedding dim
