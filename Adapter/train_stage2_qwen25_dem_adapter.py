@@ -18,7 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedul
 from peft import LoraConfig, get_peft_model, TaskType
 
 from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-from models.simple_pyramid_backbone import SimplePyramidBackbone
+from models.backbone import ResNetPyramidBackbone
 from models.da_adapter import DAAdapter, DAAdapterConfig
 
 # Avoid tokenizers fork warnings in multi-worker settings
@@ -29,14 +29,25 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 # Utils: image preprocessing (match DEMEncoderConfig)
 # -------------------------
 def pil_resize_square(img: Image.Image, size: int) -> Image.Image:
+    """
+    Resize the image to the fixed-size square.
+    """
     return img.resize((size, size), resample=Image.BICUBIC)
 
+
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
+    """
+    Convert PIL image to Tensor.
+    """
     arr = np.array(img, dtype=np.uint8)
     t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
     return t
 
+
 def normalize(t: torch.Tensor, mean: Tuple[float, float, float], std: Tuple[float, float, float]) -> torch.Tensor:
+    """
+    Construct mean/std tensor and reshape it to (3,1,1) to channel-wise broadcasting.
+    """
     m = torch.tensor(mean, dtype=t.dtype).view(3, 1, 1)
     s = torch.tensor(std, dtype=t.dtype).view(3, 1, 1)
     return (t - m) / s
@@ -246,6 +257,12 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--num_workers", type=int, default=0)
 
+    ap.add_argument("--backbone_pretrained", action="store_true", default=True)
+    ap.add_argument("--no_backbone_pretrained", action="store_false", dest="backbone_pretrained")
+
+    ap.add_argument("--freeze_llm", action="store_true",
+                    help="Freeze base LLM params (useful when not using LoRA).")
+
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -269,21 +286,29 @@ def main():
     )
 
     # Apply LoRA to LLM (recommended)
-    if args.use_lora:
-        lora_cfg = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        )
-        llm = get_peft_model(llm, lora_cfg)
+    # if args.use_lora:
+    #     lora_cfg = LoraConfig(
+    #         task_type=TaskType.CAUSAL_LM,
+    #         r=args.lora_r,
+    #         lora_alpha=args.lora_alpha,
+    #         lora_dropout=args.lora_dropout,
+    #         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    #     )
+    #     llm = get_peft_model(llm, lora_cfg)
+
+    # if using LoRA, keep LoRA trainable and freeze the base weights
+    # if not using LoRA, freeze the whole LLM
+    if args.freeze_llm:
+        for n, p, in llm.named_parameters():
+            if args.use_lora and ("lora_" in n or "lora" in n):
+                continue
+            p.requires_grad = False
 
     llm.to(device)
 
     # Vision: DEM-Encoder
     enc_cfg = DEMEncoderConfig()
-    pyramid = SimplePyramidBackbone()
+    pyramid = ResNetPyramidBackbone(name="resnet50", pretrained=args.backbone_pretrained)
     encoder = DEMVisionBackbone(pyramid_backbone=pyramid, cfg=enc_cfg).to(device)
 
     # Adapter: load from Stage-1
@@ -292,6 +317,14 @@ def main():
     adapter = DAAdapter(DAAdapterConfig(in_channels=encoder.out_channels, llm_dim=llm_dim)).to(device)
 
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu")
+    # if isinstance(ckpt, dict) and "adapter" in ckpt:
+    #     adapter.load_state_dict(ckpt["adapter"], strict=True)
+    # else:
+    #     # 兼容直接保存的 state_dict
+    #     adapter.load_state_dict(ckpt, strict=True)
+    state = ckpt["adapter"] if (isinstance(ckpt, dict) and "adapter" in ckpt) else ckpt
+    adapter.load_state_dict(state, strict=False)
+
     assert "adapter" in ckpt, "Stage-1 checkpoint must contain key 'adapter'."
     adapter.load_state_dict(ckpt["adapter"], strict=True)
 
@@ -308,6 +341,11 @@ def main():
         feat_key=args.feat_key,
         prefix_grid=args.prefix_grid,
     ).to(device)
+
+    def set_train_mode():
+        model.train()
+        if args.freeze_encoder:
+            encoder.eval()
 
     # Datasets
     train_ds = JsonlSFTDataset(args.train_jsonl)
@@ -351,7 +389,7 @@ def main():
 
     scaler = torch.cuda.amp.GradScaler(enabled=(args.fp16 and device.type == "cuda"))
 
-    model.train()
+    set_train_mode()
     global_step = 0
 
     def run_eval():
@@ -370,10 +408,11 @@ def main():
                     out = model(images, input_ids, attention_mask, labels)
                     loss = out.loss.detach().float().item()
                 losses.append(loss)
-        model.train()
+        set_train_mode()
         print(f"[valid] loss={sum(losses)/max(1,len(losses)):.4f}")
 
     for epoch in range(args.epochs):
+        set_train_mode()
         for batch in train_dl:
             images = batch["images"].to(device, non_blocking=True)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
@@ -415,7 +454,7 @@ def main():
         save_dir.mkdir(parents=True, exist_ok=True)
 
         # Save adapter
-        torch.save(adapter.state_dict(), save_dir / "da_adapter.pt")
+        torch.save({"adapter": adapter.state_dict()}, save_dir / "da_adapter.pt")
 
         # Save encoder if trainable
         if any(p.requires_grad for p in encoder.parameters()):
