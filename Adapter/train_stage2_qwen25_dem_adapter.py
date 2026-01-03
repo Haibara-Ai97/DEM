@@ -218,42 +218,56 @@ class VisionPrefixQwen(nn.Module):
         return out
 
 
-def load_encoder_ckpt(encoder: torch.nn.Module, ckpt_path: str, key: str = "encoder"):
+def load_encoder_ckpt_by_suffix(encoder: torch.nn.Module, ckpt_path: str):
     import torch
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    # 1) 抽取 state_dict
     sd = None
-
     if isinstance(ckpt, dict):
-        # 优先用显式 key（与你 stage1 的 encoder_ckpt_key 对齐）
-        if key in ckpt and isinstance(ckpt[key], dict):
-            sd = ckpt[key]
-        else:
-            # 常见包装
-            for k in ["state_dict", "model", "net", "ema"]:
-                if k in ckpt and isinstance(ckpt[k], dict):
-                    sd = ckpt[k]
-                    break
-            # 如果 dict 本身就是 state_dict
-            if sd is None and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
-                sd = ckpt
-
+        for k in ["state_dict", "model", "net", "ema"]:
+            if k in ckpt and isinstance(ckpt[k], dict):
+                sd = ckpt[k]
+                break
     if sd is None:
-        raise ValueError(f"Cannot find a usable state_dict in encoder_ckpt: {ckpt_path}")
+        sd = ckpt if isinstance(ckpt, dict) else None
+    if sd is None:
+        raise ValueError("Cannot find state_dict in ckpt.")
 
-    # 去掉常见前缀（尽量最小但实用）
-    def strip_prefix_if_present(state_dict, prefix):
-        keys = list(state_dict.keys())
-        hit = sum(1 for k in keys if k.startswith(prefix))
-        if hit >= max(1, int(0.5 * len(keys))):  # 半数以上带前缀才剥离
-            return {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
-        return state_dict
+    # 2) 去掉常见前缀
+    sd = {k.replace("module.", ""): v for k, v in sd.items()}
 
-    for pref in ["module.", "encoder.", "model.encoder."]:
-        sd = strip_prefix_if_present(sd, pref)
+    msd = encoder.state_dict()
+    loadable = {}
 
-    missing, unexpected = encoder.load_state_dict(sd, strict=False)
-    print(f"[encoder load] missing={len(missing)}, unexpected={len(unexpected)}")
+    # 3) 先尝试完全同名
+    for k, v in sd.items():
+        if k in msd and msd[k].shape == v.shape:
+            loadable[k] = v
+
+    # 4) 再做 suffix 匹配（解决 backbone./model.backbone./encoder. 等前缀）
+    if len(loadable) < len(msd) * 0.8:
+        # 建一个 “suffix -> key” 索引（避免 O(N^2) 太慢）
+        # 注意：suffix 长度可按需调，这里用全长 endswith 做即可（key 数量通常不大）
+        for mk in msd.keys():
+            if mk in loadable:
+                continue
+            # 找到一个 ckpt key 使得 ckpt_key.endswith(mk)
+            candidates = [ck for ck in sd.keys() if ck.endswith(mk)]
+            if not candidates:
+                continue
+            # 若有多个候选，选最短的（前缀最少，通常最正确）
+            ck_best = min(candidates, key=len)
+            v = sd[ck_best]
+            if msd[mk].shape == v.shape:
+                loadable[mk] = v
+
+    encoder.load_state_dict(loadable, strict=False)
+
+    print(f"[encoder load] loadable tensors: {len(loadable)}/{len(msd)}")
+    # 你也可以打印缺失 key（可选）
+    # missing = [k for k in msd.keys() if k not in loadable]
+    # print(f"[encoder load] missing={len(missing)}")
 
 
 def main():
@@ -366,7 +380,7 @@ def main():
                                 disable_dem5=args.disable_dem5).to(device)
 
     if args.encoder_ckpt:
-        load_encoder_ckpt(encoder, args.encoder_ckpt, key=args.encoder_ckpt_key)
+        load_encoder_ckpt_by_suffix(encoder, args.encoder_ckpt)
 
     # Adapter: load from Stage-1
     # Stage-1 adapter dim = LLM embedding dim
