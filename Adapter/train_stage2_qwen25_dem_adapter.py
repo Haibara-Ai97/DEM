@@ -387,7 +387,7 @@ def main():
     llm_dim = llm.get_input_embeddings().weight.shape[1]
     adapter = DAAdapter(DAAdapterConfig(in_channels=encoder.out_channels, llm_dim=llm_dim)).to(device)
 
-    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=False:wq)
+    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=False)
     # if isinstance(ckpt, dict) and "adapter" in ckpt:
     #     adapter.load_state_dict(ckpt["adapter"], strict=True)
     # else:
