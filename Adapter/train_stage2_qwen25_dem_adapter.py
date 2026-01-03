@@ -312,6 +312,8 @@ def main():
 
     args = ap.parse_args()
 
+    hf_token = os.environ.get("HF_TOKEN", None)
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
@@ -321,7 +323,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Tokenizer + LLM
-    tokenizer = AutoTokenizer.from_pretrained(args.llm_name, use_fast=True, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.llm_name, use_fast=True, trust_remote_code=True, token=hf_token)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -330,6 +332,7 @@ def main():
         torch_dtype=dtype if device.type == "cuda" else torch.float32,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
+        token=hf_token,
     )
 
     # Apply LoRA to LLM (recommended)
