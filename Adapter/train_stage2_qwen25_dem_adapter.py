@@ -202,6 +202,7 @@ class VisionPrefixQwen(nn.Module):
 
         # text embeddings
         tok_emb = self.llm.get_input_embeddings()(input_ids)  # (B,L,D)
+        vtok = vtok.to(dtype=tok_emb.dtype)
 
         # concat prefix + text
         inputs_embeds = torch.cat([vtok, tok_emb], dim=1)
@@ -458,7 +459,9 @@ def main():
     warmup_steps = int(total_steps * args.warmup_ratio)
     sched = get_cosine_schedule_with_warmup(optim, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.fp16 and device.type == "cuda"))
+    use_amp_fp16 = (args.fp16 and device.type == "cuda")
+    use_amp_bf16 = (args.bf16 and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp_fp16)
 
     set_train_mode()
     global_step = 0
@@ -491,7 +494,11 @@ def main():
             labels = batch["labels"].to(device, non_blocking=True)
 
             use_amp = (args.fp16 and device.type == "cuda")
-            with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.float16):
+            with torch.amp.autocast(
+                    device_type="cuda",
+                    enabled=(use_amp_fp16 or use_amp_bf16),
+                    dtype=(torch.float16 if use_amp_fp16 else torch.bfloat16),
+            ):
                 out = model(images, input_ids, attention_mask, labels)
                 loss = out.loss / args.grad_accum
 
