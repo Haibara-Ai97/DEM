@@ -480,9 +480,14 @@ def main():
     ap.add_argument("--lora_alpha", type=int, default=32)
     ap.add_argument("--lora_dropout", type=float, default=0.05)
 
-    # Qwen token budget controls (optional)
-    ap.add_argument("--qwen_min_pixels", type=int, default=0)
-    ap.add_argument("--qwen_max_pixels", type=int, default=0)
+    # Qwen visual token budget controls (recommended for stable training)
+    # Qwen2/2.5-VL expands one <image> placeholder into many "visual tokens" (default range 4-16384).
+    # If your max_length is small (e.g., 512/1024), you MUST cap visual tokens via min_pixels/max_pixels.
+    # You can specify either pixels (recommended by official docs) or token counts (converted using 28x28 pixels per token).
+    ap.add_argument("--qwen_min_pixels", type=int, default=0, help="Min pixels for Qwen-VL resizing. 0 = auto by qwen_*_tokens.")
+    ap.add_argument("--qwen_max_pixels", type=int, default=0, help="Max pixels for Qwen-VL resizing. 0 = auto by qwen_*_tokens.")
+    ap.add_argument("--qwen_min_tokens", type=int, default=256, help="Min visual tokens per image for Qwen-VL (converted to pixels).")
+    ap.add_argument("--qwen_max_tokens", type=int, default=256, help="Max visual tokens per image for Qwen-VL (converted to pixels).")
     ap.add_argument("--use_slow_processor", action="store_true", help="Force slow image processor (use_fast=False).")
 
     ap.add_argument("--seed", type=int, default=42)
@@ -501,7 +506,29 @@ def main():
     if not bf16 and args.fp16:
         bf16 = False  # fp16 explicitly requested
 
-    # Load model + processor
+    # ---- Qwen-VL visual token budget ----
+    # Transformers will raise:
+    #   ValueError: Mismatch in `image` token count between text and `input_ids` ...
+    # if truncation cuts inside the expanded visual-token span.
+    # To prevent this, we cap visual tokens per image by setting min_pixels/max_pixels.
+    if args.family in ("qwen2_vl", "qwen2_5_vl"):
+        # If user didn't explicitly pass pixel bounds, derive from token bounds.
+        # Each visual token corresponds to ~28*28 pixels in the official examples.
+        if args.qwen_min_pixels <= 0:
+            args.qwen_min_pixels = int(args.qwen_min_tokens) * 28 * 28
+        if args.qwen_max_pixels <= 0:
+            args.qwen_max_pixels = int(args.qwen_max_tokens) * 28 * 28
+
+        # Safety: ensure the image token span can fit into max_length with some room for system/prompt.
+        # If user sets an extremely small max_length, warn early.
+        if args.max_length and args.qwen_max_tokens >= args.max_length:
+            print(
+                f"[WARN] qwen_max_tokens={args.qwen_max_tokens} is >= max_length={args.max_length}. "
+                f"This may cause truncation inside visual tokens. Consider lowering qwen_max_tokens "
+                f"(e.g., 256) or increasing max_length (e.g., 1024+)."
+            )
+
+    # Load model \+ processor
     use_fast = not bool(args.use_slow_processor)
 
     model, processor, tokenizer = load_model_and_processor(
