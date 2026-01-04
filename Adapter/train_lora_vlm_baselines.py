@@ -46,6 +46,19 @@ from transformers import (
     set_seed,
 )
 
+
+# ---------------------------
+# Processor loader (compat for transformers fast/slow processors)
+# ---------------------------
+def safe_auto_processor_from_pretrained(model_id: str, **kwargs):
+    """Call AutoProcessor.from_pretrained with best-effort compatibility across Transformers versions."""
+    try:
+        return AutoProcessor.from_pretrained(model_id, **kwargs)
+    except TypeError:
+        # Older/newer versions may not support certain kwargs (e.g., use_fast).
+        kwargs.pop("use_fast", None)
+        return AutoProcessor.from_pretrained(model_id, **kwargs)
+
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 
@@ -362,6 +375,7 @@ def load_model_and_processor(
     family: str,
     load_in_4bit: bool,
     bf16: bool,
+    use_fast: bool,
     qwen_min_pixels: Optional[int] = None,
     qwen_max_pixels: Optional[int] = None,
 ) -> Tuple[torch.nn.Module, Any, Any]:
@@ -384,7 +398,7 @@ def load_model_and_processor(
             quantization_config=bnb_cfg,
             low_cpu_mem_usage=True,
         )
-        processor = AutoProcessor.from_pretrained(model_id)
+        processor = safe_auto_processor_from_pretrained(model_id, use_fast=use_fast)
         tokenizer = processor.tokenizer
         return model, processor, tokenizer
 
@@ -397,13 +411,14 @@ def load_model_and_processor(
             low_cpu_mem_usage=True,
         )
         if family in ("qwen2_vl", "qwen2_5_vl") and (qwen_min_pixels or qwen_max_pixels):
-            processor = AutoProcessor.from_pretrained(
+            processor = safe_auto_processor_from_pretrained(
                 model_id,
                 min_pixels=qwen_min_pixels,
                 max_pixels=qwen_max_pixels,
+                use_fast=use_fast,
             )
         else:
-            processor = AutoProcessor.from_pretrained(model_id)
+            processor = safe_auto_processor_from_pretrained(model_id, use_fast=use_fast)
         tokenizer = getattr(processor, "tokenizer", AutoTokenizer.from_pretrained(model_id, trust_remote_code=True))
         return model, processor, tokenizer
 
@@ -415,7 +430,7 @@ def load_model_and_processor(
             trust_remote_code=True,
             low_cpu_mem_usage=True,
         )
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        processor = safe_auto_processor_from_pretrained(model_id, trust_remote_code=True, use_fast=use_fast)
         tokenizer = processor.tokenizer
         return model, processor, tokenizer
 
@@ -459,6 +474,7 @@ def main():
     # Qwen token budget controls (optional)
     ap.add_argument("--qwen_min_pixels", type=int, default=0)
     ap.add_argument("--qwen_max_pixels", type=int, default=0)
+    ap.add_argument("--use_slow_processor", action="store_true", help="Force slow image processor (use_fast=False).")
 
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max_train_samples", type=int, default=0)
@@ -477,11 +493,14 @@ def main():
         bf16 = False  # fp16 explicitly requested
 
     # Load model + processor
+    use_fast = not bool(args.use_slow_processor)
+
     model, processor, tokenizer = load_model_and_processor(
         model_id=args.model_id,
         family=args.family,
         load_in_4bit=args.load_in_4bit,
         bf16=bf16,
+        use_fast=use_fast,
         qwen_min_pixels=args.qwen_min_pixels or None,
         qwen_max_pixels=args.qwen_max_pixels or None,
     )
@@ -547,15 +566,24 @@ def main():
         ddp_find_unused_parameters=False,
         report_to=[],
     )
+    import inspect
 
-    trainer = Trainer(
+    trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
-        tokenizer=tokenizer,
     )
+    sig = inspect.signature(Trainer.__init__)
+    if "tokenizer" in sig.parameters:
+        trainer_kwargs["tokenizer"] = tokenizer
+    elif "processing_class" in sig.parameters:
+        # Newer Transformers (v5+) replaced `tokenizer` with `processing_class`.
+        # For multimodal models, passing the processor is appropriate.
+        trainer_kwargs["processing_class"] = processor
+
+    trainer = Trainer(**trainer_kwargs)
 
     trainer.train()
     trainer.save_model(args.output_dir)
