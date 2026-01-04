@@ -253,13 +253,13 @@ def build_messages_prompt(sample: Dict[str, Any], family: str) -> List[Dict[str,
 # -------------------------
 # Load model
 # -------------------------
-def load_model_and_processor(model_id: str, family: str, adapter_dir: str, bf16: bool):
+def load_model_and_processor(model_id: str, family: str, adapter_dir: str, bf16: bool, qwen_min_pixels: int = 0, qwen_max_pixels: int = 0):
     torch_dtype = torch.bfloat16 if bf16 else torch.float16
 
     if family == "llava_1_5":
         from transformers import LlavaForConditionalGeneration
         model = LlavaForConditionalGeneration.from_pretrained(model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
-        processor = AutoProcessor.from_pretrained(model_id)
+        processor = AutoProcessor.from_pretrained(model_id, min_pixels=qwen_min_pixels or None, max_pixels=qwen_max_pixels or None)
         tokenizer = processor.tokenizer
     elif family in ("qwen2_vl", "qwen2_5_vl", "idefics2"):
         model = AutoModelForVision2Seq.from_pretrained(model_id, torch_dtype=torch_dtype, trust_remote_code=True, low_cpu_mem_usage=True)
@@ -307,7 +307,13 @@ class Encoder:
         if self.family in ("qwen2_vl", "qwen2_5_vl"):
             text = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
             image_inputs, video_inputs = self._qwen_process_vision_info(msgs)
-            inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
+            # Do not pass empty videos lists (no-video dataset).
+            if video_inputs is not None and isinstance(video_inputs, (list, tuple)) and len(video_inputs) == 0:
+                video_inputs = None
+            if video_inputs is None:
+                inputs = self.processor(text=[text], images=image_inputs, padding=True, return_tensors="pt")
+            else:
+                inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
             return inputs, inputs["input_ids"].shape[1]
         if self.family == "phi3v":
             prompt = self.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
@@ -331,6 +337,10 @@ def main():
     ap.add_argument("--split", type=str, default="test", choices=["train", "valid", "test"])
 
     ap.add_argument("--bf16", action="store_true")
+
+    # Qwen-VL visual token budget (optional, to control visual tokens at eval time)
+    ap.add_argument("--qwen_min_pixels", type=int, default=0)
+    ap.add_argument("--qwen_max_pixels", type=int, default=0)
     ap.add_argument("--max_samples", type=int, default=0)
 
     ap.add_argument("--max_new_tokens_yesno", type=int, default=4)
@@ -345,7 +355,7 @@ def main():
     if args.max_samples:
         data = data[: args.max_samples]
 
-    model, processor, tokenizer = load_model_and_processor(args.model_id, args.family, args.adapter_dir, args.bf16)
+    model, processor, tokenizer = load_model_and_processor(args.model_id, args.family, args.adapter_dir, args.bf16, args.qwen_min_pixels, args.qwen_max_pixels)
     enc = Encoder(args.family, processor, tokenizer)
 
     # accumulators
