@@ -297,6 +297,9 @@ class Collator:
                 prompt_texts.append(ptxt)
                 full_texts.append(ftxt)
                 image_inputs, video_inputs = self._qwen_process_vision_info(msgs_p)
+                # Normalize "no video" case: do NOT pass empty lists to the processor.
+                if video_inputs is not None and isinstance(video_inputs, (list, tuple)) and len(video_inputs) == 0:
+                    video_inputs = None
                 # For single-image case, image_inputs should be a list with 1 PIL image.
                 # We align one image list per example by taking the first element if needed.
                 # processor can accept a flat list of images aligned with text list.
@@ -304,7 +307,7 @@ class Collator:
                     qwen_images.append(image_inputs[0])
                 else:
                     qwen_images.append(image_inputs)
-                qwen_videos.append(video_inputs)
+                qwen_videos.append(video_inputs if video_inputs is not None else None)
                 img_paths.append(ex["image_path"])
             elif self.family == "phi3v":
                 ptxt = self.tokenizer.apply_chat_template(msgs_p, tokenize=False, add_generation_prompt=True)
@@ -321,24 +324,30 @@ class Collator:
 
         # Encode (full)
         if self.family in ("qwen2_vl", "qwen2_5_vl"):
-            full_inputs = self.processor(
+            # IMPORTANT: do not pass `videos` when there is no video content; passing empty lists
+            # can crash inside transformers video utils (IndexError).
+            full_kwargs = dict(
                 text=full_texts,
                 images=qwen_images,
-                videos=qwen_videos,
                 padding=True,
                 truncation=True,
                 max_length=self.max_length,
                 return_tensors="pt",
             )
-            prompt_inputs = self.processor(
+            prompt_kwargs = dict(
                 text=prompt_texts,
                 images=qwen_images,
-                videos=qwen_videos,
                 padding=True,
                 truncation=True,
                 max_length=self.max_length,
                 return_tensors="pt",
             )
+            if any(v is not None for v in qwen_videos):
+                full_kwargs["videos"] = qwen_videos
+                prompt_kwargs["videos"] = qwen_videos
+
+            full_inputs = self.processor(**full_kwargs)
+            prompt_inputs = self.processor(**prompt_kwargs)
         elif self.family == "phi3v":
             # Processor signature is processor(prompt, images, ...)
             pil_images = [self._load_pil(p) for p in img_paths]
