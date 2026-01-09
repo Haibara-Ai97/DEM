@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Trainer-based Stage-2 LoRA fine-tuning (Qwen-style) for:
-  - Your custom DEM Vision Encoder (frozen by default)
+  - Your custom DEM Vision Encoder (frozen by default; can be unfrozen for joint tuning)
   - Your custom DA Adapter (frozen by default, initialized from Stage-1 checkpoint)
   - Qwen2.5 LLM with LoRA (trainable)
 
@@ -28,6 +28,7 @@ Example (multi-GPU):
 import argparse
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -76,6 +77,16 @@ def normalize(t: torch.Tensor, mean: Tuple[float, float, float], std: Tuple[floa
     m = torch.tensor(mean, dtype=t.dtype).view(3, 1, 1)
     s = torch.tensor(std, dtype=t.dtype).view(3, 1, 1)
     return (t - m) / s
+
+
+
+def freeze_batchnorm_stats(module: nn.Module) -> None:
+    """Put all BatchNorm layers into eval mode (freeze running stats).
+    Useful when per-GPU batch size is small to avoid unstable BN updates.
+    """
+    for m in module.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            m.eval()
 
 
 # -------------------------
@@ -311,6 +322,7 @@ class VisionPrefixQwen(nn.Module):
         llm: nn.Module,
         feat_key: str = "0",
         prefix_grid: int = 8,   # prefix tokens = prefix_grid^2
+        freeze_encoder_bn: bool = True,
     ):
         super().__init__()
         self.encoder = encoder
@@ -318,6 +330,26 @@ class VisionPrefixQwen(nn.Module):
         self.llm = llm
         self.feat_key = feat_key
         self.prefix_grid = prefix_grid
+        self.freeze_encoder_bn = freeze_encoder_bn
+
+
+def train(self, mode: bool = True):
+    # Let Trainer toggle train/eval globally, then force frozen parts to stay in eval.
+    super().train(mode)
+
+    # If encoder is frozen, keep it in eval to avoid Dropout/BN updates.
+    if not any(p.requires_grad for p in self.encoder.parameters()):
+        self.encoder.eval()
+    else:
+        # If encoder is trainable but BN stats should be frozen, force BN layers to eval.
+        if self.freeze_encoder_bn:
+            freeze_batchnorm_stats(self.encoder)
+
+    # Same logic for adapter (often you want deterministic prefix features when adapter is frozen).
+    if not any(p.requires_grad for p in self.adapter.parameters()):
+        self.adapter.eval()
+
+    return self
 
     def forward(
         self,
@@ -430,9 +462,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prefix_grid", type=int, default=8)
 
     # Freeze controls (Stage-2 default: freeze encoder+adapter; train LoRA)
-    p.add_argument("--freeze_encoder", action="store_true")
-    p.add_argument("--freeze_adapter", action="store_true")
+    # NOTE: Provide explicit --no_freeze_* switches so you can jointly tune encoder/adapter.
+    p.add_argument("--freeze_encoder", action="store_true", help="Freeze encoder weights (default: True).")
+    p.add_argument("--no_freeze_encoder", action="store_false", dest="freeze_encoder", help="Unfreeze encoder weights.")
+    p.add_argument("--freeze_adapter", action="store_true", help="Freeze adapter weights (default: True).")
+    p.add_argument("--no_freeze_adapter", action="store_false", dest="freeze_adapter", help="Unfreeze adapter weights.")
     p.set_defaults(freeze_encoder=True, freeze_adapter=True)
+
+    # When unfreezing encoder with small per-GPU batch size, BatchNorm running stats can be unstable.
+    p.add_argument("--freeze_encoder_bn", action="store_true", help="Freeze encoder BatchNorm running stats (default: True).")
+    p.add_argument("--no_freeze_encoder_bn", action="store_false", dest="freeze_encoder_bn", help="Update encoder BatchNorm running stats.")
+    p.set_defaults(freeze_encoder_bn=True)
+
+    # Optional: only train a subset of encoder parameters by regex (applies only when encoder is unfrozen).
+    # Example: --encoder_train_regex "dem5|transformer\.blocks\.11"
+    p.add_argument("--encoder_train_regex", type=str, default="", help="Regex filter for encoder params to train.")
 
     # LoRA
     p.add_argument("--use_lora", action="store_true")
@@ -451,6 +495,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--warmup_ratio", type=float, default=0.03)
     p.add_argument("--lr_scheduler_type", type=str, default="cosine")
+    p.add_argument("--max_grad_norm", type=float, default=0.3, help="Gradient clipping norm (recommend 0.3 when tuning encoder).")
 
     p.add_argument("--logging_steps", type=int, default=20)
     p.add_argument("--save_steps", type=int, default=500)
@@ -542,16 +587,31 @@ def main():
         strict=args.adapter_strict,
     )
 
-    # Freeze encoder/adapter for Stage-2
-    if args.freeze_encoder:
-        encoder.eval()
-        for p in encoder.parameters():
-            p.requires_grad = False
+    
+# Freeze / unfreeze controls
+if args.freeze_encoder:
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad = False
+else:
+    encoder.train()
+    for name, p in encoder.named_parameters():
+        p.requires_grad = True
+    if args.encoder_train_regex.strip():
+        rgx = re.compile(args.encoder_train_regex.strip())
+        for name, p in encoder.named_parameters():
+            p.requires_grad = bool(rgx.search(name))
+    if args.freeze_encoder_bn:
+        freeze_batchnorm_stats(encoder)
 
-    if args.freeze_adapter:
-        adapter.eval()
-        for p in adapter.parameters():
-            p.requires_grad = False
+if args.freeze_adapter:
+    adapter.eval()
+    for p in adapter.parameters():
+        p.requires_grad = False
+else:
+    adapter.train()
+    for p in adapter.parameters():
+        p.requires_grad = True
 
     # Build multimodal wrapper
     mm_model = VisionPrefixQwen(
@@ -560,6 +620,7 @@ def main():
         llm=llm,
         feat_key=args.feat_key,
         prefix_grid=args.prefix_grid,
+        freeze_encoder_bn=args.freeze_encoder_bn,
     )
 
     # Data
@@ -581,6 +642,7 @@ def main():
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
         lr_scheduler_type=args.lr_scheduler_type,
+        max_grad_norm=args.max_grad_norm,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
@@ -592,13 +654,20 @@ def main():
         deepspeed=args.deepspeed,
     )
 
-    trainer = MultiGroupTrainer(
-        model=mm_model,
-        args=targs,
-        train_dataset=train_ds,
-        data_collator=collator,
-        tokenizer=tokenizer,
+    
+    # Build Trainer with compatibility across transformers versions (tokenizer arg was removed in recent versions).
+    import inspect as _inspect
+    _trainer_kwargs = dict(
+            model=mm_model,
+            args=targs,
+            train_dataset=train_ds,
+            data_collator=collator,
     )
+    _sig = _inspect.signature(Trainer.__init__)
+    if "tokenizer" in _sig.parameters:
+        _trainer_kwargs["tokenizer"] = tokenizer
+    trainer = MultiGroupTrainer(**_trainer_kwargs)
+
     # stash group lrs
     trainer._adapter_lr = args.adapter_lr
     trainer._encoder_lr = args.encoder_lr
