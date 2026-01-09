@@ -333,23 +333,23 @@ class VisionPrefixQwen(nn.Module):
         self.freeze_encoder_bn = freeze_encoder_bn
 
 
-def train(self, mode: bool = True):
-    # Let Trainer toggle train/eval globally, then force frozen parts to stay in eval.
-    super().train(mode)
+    def train(self, mode: bool = True):
+        # Let Trainer toggle train/eval globally, then force frozen parts to stay in eval.
+        super().train(mode)
 
-    # If encoder is frozen, keep it in eval to avoid Dropout/BN updates.
-    if not any(p.requires_grad for p in self.encoder.parameters()):
-        self.encoder.eval()
-    else:
-        # If encoder is trainable but BN stats should be frozen, force BN layers to eval.
-        if self.freeze_encoder_bn:
-            freeze_batchnorm_stats(self.encoder)
+        # If encoder is frozen, keep it in eval to avoid Dropout/BN updates.
+        if not any(p.requires_grad for p in self.encoder.parameters()):
+            self.encoder.eval()
+        else:
+            # If encoder is trainable but BN stats should be frozen, force BN layers to eval.
+            if self.freeze_encoder_bn:
+                freeze_batchnorm_stats(self.encoder)
 
-    # Same logic for adapter (often you want deterministic prefix features when adapter is frozen).
-    if not any(p.requires_grad for p in self.adapter.parameters()):
-        self.adapter.eval()
+        # Same logic for adapter (often you want deterministic prefix features when adapter is frozen).
+        if not any(p.requires_grad for p in self.adapter.parameters()):
+            self.adapter.eval()
 
-    return self
+        return self
 
     def forward(
         self,
@@ -588,108 +588,108 @@ def main():
     )
 
     
-# Freeze / unfreeze controls
-if args.freeze_encoder:
-    encoder.eval()
-    for p in encoder.parameters():
-        p.requires_grad = False
-else:
-    encoder.train()
-    for name, p in encoder.named_parameters():
-        p.requires_grad = True
-    if args.encoder_train_regex.strip():
-        rgx = re.compile(args.encoder_train_regex.strip())
+    # Freeze / unfreeze controls
+    if args.freeze_encoder:
+        encoder.eval()
+        for p in encoder.parameters():
+            p.requires_grad = False
+    else:
+        encoder.train()
         for name, p in encoder.named_parameters():
-            p.requires_grad = bool(rgx.search(name))
-    if args.freeze_encoder_bn:
-        freeze_batchnorm_stats(encoder)
+            p.requires_grad = True
+        if args.encoder_train_regex.strip():
+            rgx = re.compile(args.encoder_train_regex.strip())
+            for name, p in encoder.named_parameters():
+                p.requires_grad = bool(rgx.search(name))
+        if args.freeze_encoder_bn:
+            freeze_batchnorm_stats(encoder)
 
-if args.freeze_adapter:
-    adapter.eval()
-    for p in adapter.parameters():
-        p.requires_grad = False
-else:
-    adapter.train()
-    for p in adapter.parameters():
-        p.requires_grad = True
+    if args.freeze_adapter:
+        adapter.eval()
+        for p in adapter.parameters():
+            p.requires_grad = False
+    else:
+        adapter.train()
+        for p in adapter.parameters():
+            p.requires_grad = True
 
-    # Build multimodal wrapper
-    mm_model = VisionPrefixQwen(
-        encoder=encoder,
-        adapter=adapter,
-        llm=llm,
-        feat_key=args.feat_key,
-        prefix_grid=args.prefix_grid,
-        freeze_encoder_bn=args.freeze_encoder_bn,
-    )
+        # Build multimodal wrapper
+        mm_model = VisionPrefixQwen(
+            encoder=encoder,
+            adapter=adapter,
+            llm=llm,
+            feat_key=args.feat_key,
+            prefix_grid=args.prefix_grid,
+            freeze_encoder_bn=args.freeze_encoder_bn,
+        )
 
-    # Data
-    train_ds = JsonlSFTDataset(args.train_jsonl)
-    collator = DataCollatorSFT(
-        tokenizer=tokenizer,
-        enc_cfg=enc_cfg,
-        image_size=args.image_size,
-        max_text_len=args.max_text_len,
-    )
+        # Data
+        train_ds = JsonlSFTDataset(args.train_jsonl)
+        collator = DataCollatorSFT(
+            tokenizer=tokenizer,
+            enc_cfg=enc_cfg,
+            image_size=args.image_size,
+            max_text_len=args.max_text_len,
+        )
 
-    # TrainingArguments
-    targs = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        warmup_ratio=args.warmup_ratio,
-        lr_scheduler_type=args.lr_scheduler_type,
-        max_grad_norm=args.max_grad_norm,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        bf16=args.bf16,
-        fp16=args.fp16,
-        dataloader_num_workers=args.dataloader_num_workers,
-        remove_unused_columns=False,  # IMPORTANT for image tensors
-        report_to=[],                 # no wandb by default
-        deepspeed=args.deepspeed,
-    )
+        # TrainingArguments
+        targs = TrainingArguments(
+            output_dir=args.output_dir,
+            num_train_epochs=args.num_train_epochs,
+            per_device_train_batch_size=args.per_device_train_batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            warmup_ratio=args.warmup_ratio,
+            lr_scheduler_type=args.lr_scheduler_type,
+            max_grad_norm=args.max_grad_norm,
+            logging_steps=args.logging_steps,
+            save_steps=args.save_steps,
+            save_total_limit=args.save_total_limit,
+            bf16=args.bf16,
+            fp16=args.fp16,
+            dataloader_num_workers=args.dataloader_num_workers,
+            remove_unused_columns=False,  # IMPORTANT for image tensors
+            report_to=[],                 # no wandb by default
+            deepspeed=args.deepspeed,
+        )
 
-    
-    # Build Trainer with compatibility across transformers versions (tokenizer arg was removed in recent versions).
-    import inspect as _inspect
-    _trainer_kwargs = dict(
-            model=mm_model,
-            args=targs,
-            train_dataset=train_ds,
-            data_collator=collator,
-    )
-    _sig = _inspect.signature(Trainer.__init__)
-    if "tokenizer" in _sig.parameters:
-        _trainer_kwargs["tokenizer"] = tokenizer
-    trainer = MultiGroupTrainer(**_trainer_kwargs)
 
-    # stash group lrs
-    trainer._adapter_lr = args.adapter_lr
-    trainer._encoder_lr = args.encoder_lr
+        # Build Trainer with compatibility across transformers versions (tokenizer arg was removed in recent versions).
+        import inspect as _inspect
+        _trainer_kwargs = dict(
+                model=mm_model,
+                args=targs,
+                train_dataset=train_ds,
+                data_collator=collator,
+        )
+        _sig = _inspect.signature(Trainer.__init__)
+        if "tokenizer" in _sig.parameters:
+            _trainer_kwargs["tokenizer"] = tokenizer
+        trainer = MultiGroupTrainer(**_trainer_kwargs)
 
-    trainer.train()
+        # stash group lrs
+        trainer._adapter_lr = args.adapter_lr
+        trainer._encoder_lr = args.encoder_lr
 
-    # Save tokenizer and (if using LoRA) the PEFT weights
-    if trainer.is_world_process_zero():
-        tokenizer.save_pretrained(args.output_dir)
+        trainer.train()
 
-        # Save Adapter snapshot (always)
-        torch.save({"adapter": adapter.state_dict()}, Path(args.output_dir) / "da_adapter.pt")
+        # Save tokenizer and (if using LoRA) the PEFT weights
+        if trainer.is_world_process_zero():
+            tokenizer.save_pretrained(args.output_dir)
 
-        # Save encoder snapshot only if it is trainable
-        if any(p.requires_grad for p in encoder.parameters()):
-            torch.save({"encoder": encoder.state_dict()}, Path(args.output_dir) / "dem_encoder.pt")
+            # Save Adapter snapshot (always)
+            torch.save({"adapter": adapter.state_dict()}, Path(args.output_dir) / "da_adapter.pt")
 
-        # Save LoRA/LLM
-        if args.use_lora and hasattr(llm, "save_pretrained"):
-            llm.save_pretrained(Path(args.output_dir) / "lora_llm")
+            # Save encoder snapshot only if it is trainable
+            if any(p.requires_grad for p in encoder.parameters()):
+                torch.save({"encoder": encoder.state_dict()}, Path(args.output_dir) / "dem_encoder.pt")
 
-        print(f"[save] outputs written to: {args.output_dir}", flush=True)
+            # Save LoRA/LLM
+            if args.use_lora and hasattr(llm, "save_pretrained"):
+                llm.save_pretrained(Path(args.output_dir) / "lora_llm")
+
+            print(f"[save] outputs written to: {args.output_dir}", flush=True)
 
 
 if __name__ == "__main__":
