@@ -211,18 +211,40 @@ def build_input_and_labels(tokenizer, system: str, user: str, assistant: str, ma
             {"role": "user", "content": user},
         ]
 
-        full_ids = tokenizer.apply_chat_template(
+        def _to_1d_tensor(x):
+            # x may be: BatchEncoding, torch.Tensor, list[int], tokenizers.Encoding, or list[Encoding]
+            if isinstance(x, torch.Tensor):
+                ids = x
+            elif isinstance(x, dict) and "input_ids" in x:
+                ids = x["input_ids"]
+            elif hasattr(x, "input_ids"):
+                ids = x.input_ids
+            elif hasattr(x, "ids"):  # tokenizers.Encoding
+                ids = torch.tensor(x.ids, dtype=torch.long)
+            else:
+                ids = torch.tensor(x, dtype=torch.long)
+
+            if isinstance(ids, (list, tuple)):
+                ids = torch.tensor(ids, dtype=torch.long)
+            if isinstance(ids, torch.Tensor) and ids.dim() == 2:
+                ids = ids[0]
+            return ids
+
+        full_out = tokenizer.apply_chat_template(
             msgs_full, tokenize=True, add_generation_prompt=False, return_tensors="pt"
-        )[0]
-        prompt_ids = tokenizer.apply_chat_template(
+        )
+        prompt_out = tokenizer.apply_chat_template(
             msgs_prompt, tokenize=True, add_generation_prompt=True, return_tensors="pt"
-        )[0]
+        )
+
+        full_ids = _to_1d_tensor(full_out)
+        prompt_ids = _to_1d_tensor(prompt_out)
 
         full_ids = full_ids[:max_len]
         attn = torch.ones_like(full_ids, dtype=torch.long)
 
         labels = full_ids.clone()
-        pl = min(prompt_ids.numel(), labels.numel())
+        pl = min(int(prompt_ids.numel()), int(labels.numel()))
         labels[:pl] = -100
         return full_ids, attn, labels
 
