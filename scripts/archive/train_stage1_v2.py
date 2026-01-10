@@ -1,23 +1,18 @@
+# Archived: legacy stage1 training script (v2). Replaced by Adapter/train_stage1.py + configs.
 # scripts/train_stage1_adapter_alignment_cached.py
 from __future__ import annotations
-import argparse, os, math, random, re, atexit
+import argparse, os, math, random
 from pathlib import Path
 from collections import OrderedDict
 from typing import List, Tuple
+from tqdm import tqdm
 
 import numpy as np
 from PIL import Image
-import time
-import json
-import logging
-from datetime import datetime
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-
-from tqdm import tqdm
 
 from dem.models.backbone import SimplePyramidBackbone, ResNetPyramidBackbone
 from dem.models.da_adapter import DAAdapter, DAAdapterConfig
@@ -53,9 +48,9 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     return t
 
 
-def normalize(t: torch.Tensor, mean: Tuple[float, float, float], std: Tuple[float, float, float]) -> torch.Tensor:
-    m = torch.tensor(mean, dtype=t.dtype).view(3, 1, 1)
-    s = torch.tensor(std, dtype=t.dtype).view(3, 1, 1)
+def normalize(t: torch.Tensor, mean: Tuple[float,float,float], std: Tuple[float,float,float]) -> torch.Tensor:
+    m = torch.tensor(mean, dtype=t.dtype).view(3,1,1)
+    s = torch.tensor(std, dtype=t.dtype).view(3,1,1)
     return (t - m) / s
 
 
@@ -69,10 +64,9 @@ def collate_cached(batch, enc_cfg: DEMEncoderConfig, image_size: int):
     topi_list, topv_list, hw_list = [], [], []
     for cp in cache_paths:
         z = np.load(cp)
-        topi_list.append(torch.from_numpy(z["topi"]).long())  # (N,K)
-        topv_list.append(torch.from_numpy(z["topv"]).float())  # (N,K)
-        h = int(z["h"]);
-        w = int(z["w"])
+        topi_list.append(torch.from_numpy(z["topi"]).long())      # (N,K)
+        topv_list.append(torch.from_numpy(z["topv"]).float())     # (N,K)
+        h = int(z["h"]); w = int(z["w"])
         hw_list.append((h, w))
 
     # 假设本 batch 的 CLIP grid 一致（同一个 CLIP 模型通常一致，例如 14x14）
@@ -104,67 +98,6 @@ def symmetric_infonce(v: torch.Tensor, s: torch.Tensor, temperature: float) -> t
     logits = (v @ s.t()) / max(temperature, 1e-6)
     targets = torch.arange(logits.size(0), device=logits.device)
     return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.t(), targets))
-
-
-def supervised_xmodal_contrastive(
-        v: torch.Tensor,
-        s: torch.Tensor,
-        y: torch.Tensor,
-        temperature: float,
-        chunk_size: int = 0,
-) -> torch.Tensor:
-    """Multi-positive cross-modal contrastive loss (SupCon-style).
-
-    For each visual token v_i (anchor), all semantic tokens s_j with the SAME label y are treated as positives.
-    Symmetric direction (s as anchor, v as positives) is also applied.
-
-    Args:
-        v: (M, d) normalized visual token embeddings
-        s: (M, d) normalized semantic token embeddings (teacher targets)
-        y: (M,) integer labels (e.g., top-1 phrase id) aligned with v/s tokens
-        temperature: contrastive temperature
-        chunk_size: if >0, compute logits in chunks to reduce memory
-
-    Returns:
-        scalar loss
-    """
-    assert v.dim() == 2 and s.dim() == 2, f"v/s must be 2D, got {v.shape}, {s.shape}"
-    assert v.size(0) == s.size(0), f"M mismatch: {v.size(0)} vs {s.size(0)}"
-    y = y.view(-1)
-    assert y.numel() == v.size(0), f"label size mismatch: {y.numel()} vs {v.size(0)}"
-
-    temp = max(float(temperature), 1e-6)
-
-    def _dir_loss(a: torch.Tensor, b: torch.Tensor, ya: torch.Tensor, yb: torch.Tensor) -> torch.Tensor:
-        M = a.size(0)
-        Bt = b.t()  # (d, M)
-        losses = []
-
-        if chunk_size and M > chunk_size:
-            for i0 in range(0, M, chunk_size):
-                i1 = min(M, i0 + chunk_size)
-                logits = (a[i0:i1] @ Bt) / temp  # (m, M)
-                # log denominator
-                log_denom = torch.logsumexp(logits, dim=1)  # (m,)
-                # positives mask
-                pos_mask = (ya[i0:i1].unsqueeze(1) == yb.unsqueeze(0))  # (m, M)
-                neg_inf = torch.finfo(logits.dtype).min
-                logits_pos = logits.masked_fill(~pos_mask, neg_inf)
-                log_num = torch.logsumexp(logits_pos, dim=1)  # (m,)
-                losses.append(-(log_num - log_denom))
-            return torch.cat(losses, dim=0).mean()
-        else:
-            logits = (a @ Bt) / temp  # (M, M)
-            log_denom = torch.logsumexp(logits, dim=1)
-            pos_mask = (ya.unsqueeze(1) == yb.unsqueeze(0))
-            neg_inf = torch.finfo(logits.dtype).min
-            logits_pos = logits.masked_fill(~pos_mask, neg_inf)
-            log_num = torch.logsumexp(logits_pos, dim=1)
-            return (-(log_num - log_denom)).mean()
-
-    loss_v2s = _dir_loss(v, s, y, y)
-    loss_s2v = _dir_loss(s, v, y, y)
-    return 0.5 * (loss_v2s + loss_s2v)
 
 
 def window_sample_indices_by_conf(conf_hw: torch.Tensor, win: int, mode: str, seed: int = None) -> torch.Tensor:
@@ -260,6 +193,7 @@ def load_encoder_ckpt_by_suffix(encoder: torch.nn.Module, ckpt_path: str):
     # print(f"[encoder load] missing={len(missing)}")
 
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache_index_csv", type=str, required=True, help="data/stage1_clip_cache/index.csv")
@@ -268,28 +202,16 @@ def main():
     ap.add_argument("--output_dir", type=str, default="checkpoints/stage1_cached")
 
     ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--log_every", type=int, default=20, help="Log/update tqdm postfix every N steps")
-
-    # ---- resume / checkpoint ----
-    ap.add_argument("--resume", type=str, default="", help="Path to a checkpoint to resume training")
-    ap.add_argument("--resume_strict", action="store_true", help="Use strict=True when loading state_dict")
-    ap.add_argument("--reset_optimizer", action="store_true",
-                    help="When resuming, do NOT load optimizer/scaler state (fresh optimizer)")
-    ap.add_argument("--reset_rng", action="store_true",
-                    help="When resuming, do NOT restore RNG states (default restores if present)")
-
     ap.add_argument("--batch_size", type=int, default=8)
+    # ---- resume / logging ----
+    ap.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume (stage1_cached_epoch*.pt)")
+    ap.add_argument("--resume_strict", action="store_true", help="Use strict=True when loading state_dict")
+    ap.add_argument("--log_every", type=int, default=20, help="Print/refresh metrics every N steps")
+
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--wd", type=float, default=0.01)
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--win", type=int, default=2)
-    ap.add_argument("--loss_type", type=str, default="supcon",
-                    choices=["infonce", "supcon", "mix"],
-                    help="Loss: infonce (diagonal), supcon (multi-positive), or mix")
-    ap.add_argument("--supcon_weight", type=float, default=0.7,
-                    help="When loss_type=mix: weight for supcon term (0~1)")
-    ap.add_argument("--supcon_chunk", type=int, default=0,
-                    help="Chunk size for supcon logits to save memory; 0=full matmul")
     # ---- teacher soft targets (Top-N) ----
     ap.add_argument("--teacher_topk", type=int, default=3, help="Top-N soft target from CLIP cache")
     ap.add_argument("--teacher_temperature", type=float, default=0.03, help="Softmax temp for topv -> weights")
@@ -302,7 +224,7 @@ def main():
                     help="How to pick one token per window")
 
     ap.add_argument("--image_size", type=int, default=224)
-    ap.add_argument("--feat_key", type=str, default="0", choices=["0", "1", "2", "3"])
+    ap.add_argument("--feat_key", type=str, default="0", choices=["0","1","2","3"])
     ap.add_argument("--align_to_cache_grid", action="store_true", help="把 encoder 特征插值到 cache 的 h,w")
     ap.add_argument("--train_encoder", action="store_true")
     ap.add_argument("--amp", action="store_true")
@@ -331,62 +253,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # -------------------------
-    # Logging setup (text log + jsonl metrics)
-    # -------------------------
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    log_path = out_dir / f"train_{run_id}.log"
-    jsonl_path = out_dir / f"metrics_{run_id}.jsonl"
-
-    logger = logging.getLogger("train_v3")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-
-    _fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-
-    _fh = logging.FileHandler(log_path, encoding="utf-8")
-    _fh.setLevel(logging.INFO)
-    _fh.setFormatter(_fmt)
-    logger.addHandler(_fh)
-
-    _sh = logging.StreamHandler()
-    _sh.setLevel(logging.INFO)
-    _sh.setFormatter(_fmt)
-    logger.addHandler(_sh)
-
-    jsonl_f = open(jsonl_path, "a", encoding="utf-8", buffering=1)
-
-    def log_json(obj: dict):
-        obj["ts"] = datetime.now().isoformat(timespec="seconds")
-        jsonl_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-    # ensure the handle is closed on normal exit
-    atexit.register(lambda: jsonl_f.close())
-
-    logger.info(f"run_id={run_id}")
-    logger.info(f"log_path={log_path}")
-    logger.info(f"jsonl_path={jsonl_path}")
-    logger.info("args=" + json.dumps(vars(args), ensure_ascii=False))
-
-    # minimal environment info
-    try:
-        logger.info(f"torch={torch.__version__} cuda_available={torch.cuda.is_available()} device={device}")
-        if torch.cuda.is_available():
-            logger.info(f"gpu={torch.cuda.get_device_name(0)}")
-    except Exception as _e:
-        logger.info(f"env_log_failed: {_e}")
-
-    log_json({"event": "run_start", "run_id": run_id, "device": str(device)})
-
     # domain vocab（用于顺序一致性检查）
     vocab = [l.strip() for l in open(args.domain_vocab, "r", encoding="utf-8") if l.strip()]
 
     payload = torch.load(args.llm_phrase_pt, map_location="cpu")
     assert payload["phrases"] == vocab, "domain_vocab.txt 与 llm_phrase_embeds.pt 的短语顺序不一致，请重新预计算。"
-    llm_phrase = F.normalize(payload["embeds"].to(device), dim=-1)  # (V,d_llm)
+    llm_phrase = F.normalize(payload["embeds"].to(device), dim=-1)   # (V,d_llm)
     llm_dim = llm_phrase.size(-1)
 
     # DEM-Encoder
@@ -438,123 +310,62 @@ def main():
     global_step = 0
 
     if args.resume:
-        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        ckpt = torch.load(args.resume, map_location="cpu")
 
-        # ---- model states ----
-        if "adapter" in ckpt:
-            adapter.load_state_dict(ckpt["adapter"], strict=args.resume_strict)
-        else:
-            # backward compatibility: if checkpoint is a pure state_dict
-            if isinstance(ckpt, dict) and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
-                adapter.load_state_dict(ckpt, strict=args.resume_strict)
+        # models
+        adapter.load_state_dict(ckpt["adapter"], strict=args.resume_strict)
+        if args.train_encoder:
+            if "encoder" in ckpt:
+                encoder.load_state_dict(ckpt["encoder"], strict=args.resume_strict)
             else:
-                raise KeyError("Checkpoint missing 'adapter' state.")
+                print("[resume] Warning: args.train_encoder=True but no encoder state in ckpt.")
 
-        if "encoder" in ckpt:
-            encoder.load_state_dict(ckpt["encoder"], strict=False)
+        # optim/scaler
+        if "optim" in ckpt:
+            optim.load_state_dict(ckpt["optim"])
+        else:
+            print("[resume] Warning: no optim state in ckpt (will NOT truly resume optimizer).")
 
-        # ---- optimizer / scaler ----
-        if (not args.reset_optimizer) and ("optim" in ckpt):
-            try:
-                optim.load_state_dict(ckpt["optim"])
-            except Exception as e:
-                print(f"[resume] Warning: failed to load optimizer state: {e}")
-        elif args.resume and (not args.reset_optimizer):
-            print("[resume] Warning: no optimizer state in checkpoint (will resume weights only).")
-
-        if (not args.reset_optimizer) and ("scaler" in ckpt) and (ckpt["scaler"] is not None) and args.amp:
+        if "scaler" in ckpt and ckpt["scaler"] is not None:
             try:
                 scaler.load_state_dict(ckpt["scaler"])
             except Exception as e:
-                print(f"[resume] Warning: failed to load GradScaler state: {e}")
+                print(f"[resume] Warning: failed to load scaler state: {e}")
 
-        # ---- epoch / step ----
-        if "epoch" in ckpt:
-            start_epoch = int(ckpt["epoch"])
-        else:
-            # fallback: parse from filename '...epoch{n}.pt'
-            m = re.search(r"epoch(\d+)", os.path.basename(args.resume))
-            start_epoch = int(m.group(1)) if m else 0
-
+        # epoch/step
+        start_epoch = int(ckpt.get("epoch", 0))  # epoch is "next epoch to run"
         global_step = int(ckpt.get("global_step", 0))
 
-        # ---- RNG states (optional) ----
-        if (not args.reset_rng) and ("rng" in ckpt) and (ckpt["rng"] is not None):
-            rng = ckpt["rng"]
+        # RNG states (optional but recommended)
+        rng = ckpt.get("rng", None)
+        if rng is not None:
             try:
                 random.setstate(rng["py"])
                 np.random.set_state(rng["np"])
                 torch.set_rng_state(rng["torch"])
-                if torch.cuda.is_available() and (rng.get("cuda") is not None):
+                if torch.cuda.is_available() and ("cuda" in rng) and (rng["cuda"] is not None):
                     torch.cuda.set_rng_state_all(rng["cuda"])
             except Exception as e:
                 print(f"[resume] Warning: failed to restore RNG states: {e}")
 
         print(f"[resume] Loaded {args.resume} (start_epoch={start_epoch}, global_step={global_step})")
 
-        try:
-            logger.info(
-                f"[resume] path={args.resume} start_epoch={start_epoch} global_step={global_step} "
-                f"reset_optimizer={args.reset_optimizer} reset_rng={args.reset_rng}"
-            )
-            log_json({
-                "event": "resume",
-                "path": args.resume,
-                "start_epoch": int(start_epoch),
-                "global_step": int(global_step),
-                "reset_optimizer": bool(args.reset_optimizer),
-                "reset_rng": bool(args.reset_rng),
-            })
-        except Exception as _e:
-            print(f"[resume] log failed: {_e}")
-
         # ensure modes are correct after loading
         adapter.train()
-        if args.train_encoder:
-            encoder.train()
-        else:
+        if not args.train_encoder:
             encoder.eval()
+        else:
+            encoder.train()
 
     # -------------------------
     # Training loop
     # -------------------------
     for epoch in range(start_epoch, args.epochs):
         pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{args.epochs}", dynamic_ncols=True)
-        # epoch running stats (averaged over batches)
-        epoch_t0 = time.time()
-        ep_skips = 0
-        ep_loss_sum = 0.0
-        ep_diag_sum = 0.0
-        ep_phrase_sum = 0.0
-        ep_group_sum = 0.0
-        ep_n = 0
-        ep_phrase_n = 0
-        ep_group_n = 0
         for paths, enc_x, topi, topv, (h, w) in pbar:
             enc_x = enc_x.to(device, non_blocking=True)
-            topi = topi.to(device, non_blocking=True)  # (B,N,K)
-            topv = topv.to(device, non_blocking=True)  # (B,N,K)
-
-            # DataLoader collate may stack h/w into tensors; convert to python ints
-            if torch.is_tensor(h):
-                if h.numel() > 1:
-                    if not torch.all(h == h.flatten()[0]):
-                        # if mixed, fall back to per-sample handling (not supported here)
-                        raise ValueError(f"Mixed h in one batch: {h}")
-                    h = int(h.flatten()[0].item())
-                else:
-                    h = int(h.item())
-            else:
-                h = int(h)
-            if torch.is_tensor(w):
-                if w.numel() > 1:
-                    if not torch.all(w == w.flatten()[0]):
-                        raise ValueError(f"Mixed w in one batch: {w}")
-                    w = int(w.flatten()[0].item())
-                else:
-                    w = int(w.item())
-            else:
-                w = int(w)
+            topi = topi.to(device, non_blocking=True)   # (B,N,K)
+            topv = topv.to(device, non_blocking=True)   # (B,N,K)
 
             # Encoder -> features
             if args.train_encoder:
@@ -563,7 +374,7 @@ def main():
                 with torch.no_grad():
                     feats: OrderedDict = encoder(enc_x)
 
-            feat = feats[args.feat_key]  # (B,C,Hf,Wf)
+            feat = feats[args.feat_key]                  # (B,C,Hf,Wf)
 
             # align to cache grid (h,w)
             if args.align_to_cache_grid:
@@ -598,10 +409,12 @@ def main():
 
                 # if V grid differs from cache grid, up/down sample S to match V token count
                 if V.size(1) != S.size(1):
-                    Sd = S.transpose(1, 2).reshape(B, llm_dim, h, w)
+                    Sd = S.transpose(1,2).reshape(B, llm_dim, h, w)
                     Sd = F.interpolate(Sd, size=(Hf, Wf), mode="bilinear", align_corners=False)
-                    S = Sd.flatten(2).transpose(1, 2).contiguous()
+                    S = Sd.flatten(2).transpose(1,2).contiguous()
                     S = F.normalize(S, dim=-1)
+
+                idx = window_sample_indices(Hf, Wf, win=args.win, seed=args.seed + global_step).to(device)
                 # ---- build confidence map (from cache topv) and align to V grid ----
                 conf_cache = topv.max(dim=-1).values  # (B,N_cache)
                 conf_map = conf_cache.reshape(B, 1, h, w)  # (B,1,h,w)
@@ -635,35 +448,8 @@ def main():
                 V_s = V_sel.reshape(-1, llm_dim)[keep]  # (M',d)
                 S_s = S_sel.reshape(-1, llm_dim)[keep]  # (M',d)
 
-                # labels for supervised contrastive / metrics (Top-1 phrase id)
-                y_train = None
-                if V.size(1) == topi.size(1):
-                    y_train = topi[..., 0].gather(1, idx_batch).reshape(-1)[keep]  # (M',)
-
                 # if too few tokens remain, skip this step (avoid degenerate CE)
-
                 if V_s.size(0) < args.min_tokens:
-                    ep_skips += 1
-                    if global_step % args.log_every == 0:
-                        kept_tokens = int(V_s.size(0))
-                        total_tokens = int(V_sel.numel() // llm_dim)
-                        lr_now = float(optim.param_groups[0]["lr"]) if len(optim.param_groups) else None
-                        try:
-                            logger.info(
-                                f"step={global_step} SKIP kept_tokens={kept_tokens} total_tokens={total_tokens} "
-                                f"min_tokens={args.min_tokens} lr={lr_now}"
-                            )
-                            log_json({
-                                "event": "skip",
-                                "epoch": int(epoch),
-                                "step": int(global_step),
-                                "kept_tokens": kept_tokens,
-                                "total_tokens": total_tokens,
-                                "min_tokens": int(args.min_tokens),
-                                "lr": lr_now,
-                            })
-                        except Exception:
-                            pass
                     global_step += 1
                     continue
 
@@ -683,94 +469,39 @@ def main():
                         sim = Vn @ Sn.t()
                         pred_inbatch = sim.argmax(dim=1)
                         diag_top1_acc = (
-                                pred_inbatch == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
+                                    pred_inbatch == torch.arange(sim.size(0), device=sim.device)).float().mean().item()
 
                         # (2) phrase-level 38-way top-1 acc (更稳定、更符合你任务)
                         # 只有在 token 与 cache grid 一致时才有离散标签（你现在通常 align_to_cache_grid=True，因此成立）
                         phrase_top1_acc = -1.0
-                        if y_train is not None:
-                            sim_phrase = Vn @ llm_phrase.float().t()  # (M, Vocab)
+                        if V.size(1) == topi.size(1):
+                            y = topi[..., 0].gather(1, idx_batch).reshape(-1)[keep]  # (M',)
+                            sim_phrase = Vn @ llm_phrase.float().t()  # (M, Vocab=38)
                             pred_phrase = sim_phrase.argmax(dim=1)
-                            phrase_top1_acc = (pred_phrase == y_train).float().mean().item()
+                            phrase_top1_acc = (pred_phrase == y).float().mean().item()
 
                         # (3) group-correct acc: 允许命中同类 token（缓解“对角线过苛刻”的低估）
                         group_correct_acc = -1.0
-                        if y_train is not None:
-                            group_correct_acc = (y_train[pred_inbatch] == y_train).float().mean().item()
+                        if V.size(1) == topi.size(1):
+                            y = topi[..., 0].gather(1, idx_batch).reshape(-1)[keep]
+                            group_correct_acc = (y[pred_inbatch] == y).float().mean().item()
 
-                # ---- training loss (fp32 for stability) ----
-                with torch.cuda.amp.autocast(enabled=False):
-                    V_fp = V_s.float()
-                    S_fp = S_s.float()
-                    if args.loss_type == "supcon" and (y_train is not None):
-                        loss = supervised_xmodal_contrastive(V_fp, S_fp, y_train, temperature=args.temperature,
-                                                             chunk_size=args.supcon_chunk)
-                    elif args.loss_type == "mix" and (y_train is not None):
-                        loss_sup = supervised_xmodal_contrastive(V_fp, S_fp, y_train, temperature=args.temperature,
-                                                                 chunk_size=args.supcon_chunk)
-                        loss_inf = symmetric_infonce(V_fp, S_fp, temperature=args.temperature)
-                        w = float(args.supcon_weight)
-                        loss = w * loss_sup + (1.0 - w) * loss_inf
-                    else:
-                        # fallback: diagonal InfoNCE
-                        loss = symmetric_infonce(V_fp, S_fp, temperature=args.temperature)
-
-                # ---- accumulate epoch stats ----
-                ep_loss_sum += float(loss.item())
-                ep_diag_sum += float(diag_top1_acc)
-                ep_n += 1
-                if phrase_top1_acc >= 0:
-                    ep_phrase_sum += float(phrase_top1_acc)
-                    ep_phrase_n += 1
-                if group_correct_acc >= 0:
-                    ep_group_sum += float(group_correct_acc)
-                    ep_group_n += 1
-
+                # ---- training loss ----
+                loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
                 if global_step % args.log_every == 0:
-                    # update tqdm postfix with running epoch averages
-                    avg_loss = ep_loss_sum / max(ep_n, 1)
-                    avg_diag = ep_diag_sum / max(ep_n, 1)
-                    avg_phrase = (ep_phrase_sum / ep_phrase_n) if ep_phrase_n > 0 else -1.0
-                    avg_group = (ep_group_sum / ep_group_n) if ep_group_n > 0 else -1.0
+                    msg = (f"step={global_step} loss={loss.item():.4f} "
+                           f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} "
+                           f"group={group_correct_acc:.4f} feat={Hf}x{Wf}")
+                    # tqdm friendly
                     pbar.set_postfix({
-                        "loss": f"{avg_loss:.4f}",
-                        "diag": f"{avg_diag:.4f}",
-                        "phrase": f"{avg_phrase:.4f}" if avg_phrase >= 0 else "NA",
-                        "group": f"{avg_group:.4f}" if avg_group >= 0 else "NA",
-                        "step": global_step,
+                        "loss": f"{loss.item():.4f}",
+                        "diag": f"{diag_top1_acc:.4f}",
+                        "phrase": f"{phrase_top1_acc:.4f}",
+                        "group": f"{group_correct_acc:.4f}",
+                        "step": global_step
                     })
-                    tqdm.write(
-                        f"step={global_step} loss={loss.item():.4f} diag={diag_top1_acc:.4f} "
-                        f"phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}"
-                    )
-
-                    kept_tokens = int(V_s.size(0))
-                    total_tokens = int(V_sel.numel() // llm_dim)
-                    lr_now = float(optim.param_groups[0]["lr"]) if len(optim.param_groups) else None
-                    try:
-                        logger.info(
-                            f"step={global_step} loss={loss.item():.4f} diag={diag_top1_acc:.4f} "
-                            f"phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} "
-                            f"kept={kept_tokens}/{total_tokens} lr={lr_now}"
-                        )
-                        log_json({
-                            "event": "step",
-                            "epoch": int(epoch),
-                            "step": int(global_step),
-                            "lr": lr_now,
-                            "loss": float(loss.item()),
-                            "diag": float(diag_top1_acc),
-                            "phrase": float(phrase_top1_acc),
-                            "group": float(group_correct_acc),
-                            "avg_loss": float(avg_loss),
-                            "avg_diag": float(avg_diag),
-                            "avg_phrase": float(avg_phrase),
-                            "avg_group": float(avg_group),
-                            "kept_tokens": kept_tokens,
-                            "total_tokens": total_tokens,
-                        })
-                    except Exception:
-                        pass
+                    # 若你仍想保留文本日志：用 tqdm.write 避免破坏进度条
+                    tqdm.write(msg)
 
             optim.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -779,41 +510,12 @@ def main():
 
             global_step += 1
 
-
-        # ---- epoch summary ----
-        epoch_sec = time.time() - epoch_t0
-        avg_loss = ep_loss_sum / max(ep_n, 1)
-        avg_diag = ep_diag_sum / max(ep_n, 1)
-        avg_phrase = (ep_phrase_sum / ep_phrase_n) if ep_phrase_n > 0 else -1.0
-        avg_group = (ep_group_sum / ep_group_n) if ep_group_n > 0 else -1.0
-        msg = (
-            f"[epoch {epoch + 1}/{args.epochs}] "
-            f"loss={avg_loss:.4f} diag={avg_diag:.4f} "
-            f"phrase={avg_phrase:.4f} group={avg_group:.4f} "
-            f"skips={ep_skips} time_sec={epoch_sec:.1f}"
-        )
-        tqdm.write(msg)
-        try:
-            logger.info(msg)
-            log_json({
-                "event": "epoch_end",
-                "epoch": int(epoch),
-                "avg_loss": float(avg_loss),
-                "avg_diag": float(avg_diag),
-                "avg_phrase": float(avg_phrase),
-                "avg_group": float(avg_group),
-                "skips": int(ep_skips),
-                "time_sec": float(epoch_sec),
-            })
-        except Exception:
-            pass
-
         ckpt = {
             "adapter": adapter.state_dict(),
             "args": vars(args),
             "optim": optim.state_dict(),
-            "scaler": scaler.state_dict() if (args.amp and device.type == "cuda") else None,
-            "epoch": epoch + 1,  # next epoch to run (0-based)
+            "scaler": scaler.state_dict() if args.amp else None,
+            "epoch": epoch + 1,  # next epoch to run
             "global_step": global_step,
             "rng": {
                 "py": random.getstate(),
@@ -829,18 +531,6 @@ def main():
         torch.save(ckpt, save_path)
         print(f"[ckpt] saved: {save_path}")
 
-        try:
-            logger.info(f"[ckpt] saved: {save_path}")
-            log_json({"event": "ckpt", "epoch": int(epoch), "path": str(save_path)})
-        except Exception:
-            pass
-
-
-    try:
-        jsonl_f.flush()
-        jsonl_f.close()
-    except Exception:
-        pass
     print(f"Done. Saved to {args.output_dir}")
 
 
