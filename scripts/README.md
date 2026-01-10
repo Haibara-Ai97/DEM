@@ -24,13 +24,20 @@ This directory contains the latest training, fine-tuning, evaluation, and data-p
   - **Purpose**: Stage-2 LoRA fine-tuning with optional joint tuning of DEM encoder + DA adapter.
   - **Command**:
     ```bash
-    torchrun --nproc_per_node=8 -m scripts.stage2.train_lora_stage2_qwenstyle_trainer_v5_joint_encoder \
-      --train_jsonl /path/train.jsonl \
-      --output_dir /path/out \
+    torchrun --nproc_per_node=8 scripts/stage2/train_lora_stage2_qwenstyle_trainer_v5_joint_encoder.py \
+      --train_jsonl /path/to/train.jsonl \
+      --output_dir /path/to/output \
       --llm_name Qwen/Qwen2.5-7B-Instruct \
-      --stage1_ckpt /path/stage1.pt \
-      --encoder_ckpt /path/encoder_best.pth \
+      --stage1_ckpt /path/to/stage1.pt \
+      --encoder_ckpt /path/to/encoder_best.pth \
       --use_lora \
+      --no_freeze_encoder \
+      --encoder_lr 2e-5 \
+      --adapter_lr 1e-4 \
+      --learning_rate 2e-4 \
+      --per_device_train_batch_size 1 \
+      --gradient_accumulation_steps 8 \
+      --max_text_len 512 \
       --bf16
     ```
 
