@@ -1,6 +1,6 @@
 import argparse
 
-from dem.data.cache import build_clip_cache
+from utils.data.cache import build_clip_cache
 
 
 def main():

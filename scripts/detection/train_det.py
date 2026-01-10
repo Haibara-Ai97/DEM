@@ -8,7 +8,7 @@ from datetime import datetime
 
 import torch
 from torch.utils.data import DataLoader
-from dem.config_utils import apply_overrides, get_by_path, load_yaml, set_by_path, write_yaml
+from utils.config_utils import apply_overrides, get_by_path, load_yaml, set_by_path, write_yaml
 
 from apps.detection.datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
 from apps.detection.models.detector_factory import (
@@ -146,15 +146,15 @@ def main(argv=None):
     elif model_name == "dem_resnet50":
         model = build_dem_fasterrcnn(
             num_classes_fg,
-            dem_C=int(get_by_path(cfg, "model.dem.C", 256)),
-            init_gamma=float(get_by_path(cfg, "model.dem.init_gamma", 0.5)),
-            lf_kernel=int(get_by_path(cfg, "model.dem.lf_kernel", 7)),
+            dem_C=int(get_by_path(cfg, "model.utils.C", 256)),
+            init_gamma=float(get_by_path(cfg, "model.utils.init_gamma", 0.5)),
+            lf_kernel=int(get_by_path(cfg, "model.utils.lf_kernel", 7)),
             anchor_sizes=anchor_sizes,
             aspect_ratios=aspect_ratios,
-            disable_dem2=bool(get_by_path(cfg, "model.dem.disable_dem2", False)),
-            disable_dem3=bool(get_by_path(cfg, "model.dem.disable_dem3", False)),
-            disable_dem4=bool(get_by_path(cfg, "model.dem.disable_dem4", False)),
-            disable_dem5=bool(get_by_path(cfg, "model.dem.disable_dem5", False)),
+            disable_dem2=bool(get_by_path(cfg, "model.utils.disable_dem2", False)),
+            disable_dem3=bool(get_by_path(cfg, "model.utils.disable_dem3", False)),
+            disable_dem4=bool(get_by_path(cfg, "model.utils.disable_dem4", False)),
+            disable_dem5=bool(get_by_path(cfg, "model.utils.disable_dem5", False)),
         )
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -222,10 +222,10 @@ def main(argv=None):
             "model": model_name,
             "num_classes_fg": int(num_classes_fg),
             "disable_dem": {
-                "dem2": bool(get_by_path(cfg, "model.dem.disable_dem2", False)),
-                "dem3": bool(get_by_path(cfg, "model.dem.disable_dem3", False)),
-                "dem4": bool(get_by_path(cfg, "model.dem.disable_dem4", False)),
-                "dem5": bool(get_by_path(cfg, "model.dem.disable_dem5", False)),
+                "dem2": bool(get_by_path(cfg, "model.utils.disable_dem2", False)),
+                "dem3": bool(get_by_path(cfg, "model.utils.disable_dem3", False)),
+                "dem4": bool(get_by_path(cfg, "model.utils.disable_dem4", False)),
+                "dem5": bool(get_by_path(cfg, "model.utils.disable_dem5", False)),
             },
             "cfg": cfg,
         }

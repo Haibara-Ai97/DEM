@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from dem.config_utils import load_yaml
+from utils.config_utils import load_yaml
 from models.vlm_baselines import build_messages_prompt, load_model_and_processor
 
 

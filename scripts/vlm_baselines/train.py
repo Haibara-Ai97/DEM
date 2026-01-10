@@ -43,7 +43,7 @@ from transformers import (
     set_seed,
 )
 
-from dem.config_utils import load_yaml
+from utils.config_utils import load_yaml
 from models.vlm_baselines import (
     build_messages_full,
     build_messages_prompt,

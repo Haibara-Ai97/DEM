@@ -17,11 +17,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from dem.config_utils import apply_overrides, get_by_path, load_yaml, write_yaml
+from utils.config_utils import apply_overrides, get_by_path, load_yaml, write_yaml
 
 from models.dem_encoder import ResNetPyramidBackbone, SimplePyramidBackbone, DEMEncoderConfig, DEMVisionBackbone
 from models.da_adapter import DAAdapter, DAAdapterConfig
-from dem.data.datasets import CacheCollator, CacheIndexDataset
+from utils.data.datasets import CacheCollator, CacheIndexDataset
 
 
 def window_sample_indices(h: int, w: int, win: int, seed: int | None = None) -> torch.Tensor:
