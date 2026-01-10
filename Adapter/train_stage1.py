@@ -11,78 +11,18 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
-from PIL import Image
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
 
 from dem.models.backbone import ResNetPyramidBackbone, SimplePyramidBackbone
 from dem.models.da_adapter import DAAdapter, DAAdapterConfig
 from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-
-
-class CacheIndexDataset(Dataset):
-    def __init__(self, index_csv: str):
-        import pandas as pd
-
-        df = pd.read_csv(index_csv)
-        assert "image_path" in df.columns and "cache_path" in df.columns
-        self.image_paths = df["image_path"].tolist()
-        self.cache_paths = df["cache_path"].tolist()
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img = Image.open(self.image_paths[idx]).convert("RGB")
-        return self.image_paths[idx], img, self.cache_paths[idx]
-
-
-def pil_resize_square(img: Image.Image, size: int) -> Image.Image:
-    return img.resize((size, size), resample=Image.BICUBIC)
-
-
-def pil_to_tensor(img: Image.Image) -> torch.Tensor:
-    arr = np.array(img, dtype=np.uint8)
-    t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
-    return t
-
-
-def normalize(t: torch.Tensor, mean: Tuple[float, float, float], std: Tuple[float, float, float]) -> torch.Tensor:
-    m = torch.tensor(mean, dtype=t.dtype).view(3, 1, 1)
-    s = torch.tensor(std, dtype=t.dtype).view(3, 1, 1)
-    return (t - m) / s
-
-
-def collate_cached(batch, enc_cfg: DEMEncoderConfig, image_size: int):
-    paths, imgs, cache_paths = zip(*batch)
-
-    enc_imgs = [pil_resize_square(im, image_size) for im in imgs]
-    enc_x = torch.stack([
-        normalize(pil_to_tensor(im), enc_cfg.image_mean, enc_cfg.image_std) for im in enc_imgs
-    ], dim=0)
-
-    topi_list, topv_list, hw_list = [], [], []
-    for cp in cache_paths:
-        z = np.load(cp)
-        topi_list.append(torch.from_numpy(z["topi"]).long())
-        topv_list.append(torch.from_numpy(z["topv"]).float())
-        h = int(z["h"])
-        w = int(z["w"])
-        hw_list.append((h, w))
-
-    assert len(set(hw_list)) == 1, f"Cache grid differs inside a batch: {hw_list}"
-    h, w = hw_list[0]
-
-    topi = torch.stack(topi_list, dim=0)
-    topv = torch.stack(topv_list, dim=0)
-
-    return list(paths), enc_x, topi, topv, (h, w)
+from dem.data.datasets import CacheCollator, CacheIndexDataset
 
 
 def window_sample_indices(h: int, w: int, win: int, seed: int | None = None) -> torch.Tensor:
@@ -277,11 +217,11 @@ def main():
     cfg = load_config(args.config)
     apply_overrides(cfg, args.set)
 
-    cache_index_csv = get_by_path(cfg, "data.cache_index_csv")
+    cache_index_csv = get_by_path(cfg, "data.cache_index") or get_by_path(cfg, "data.cache_index_csv")
     llm_phrase_pt = get_by_path(cfg, "data.llm_phrase_pt")
     domain_vocab = get_by_path(cfg, "data.domain_vocab")
     if not cache_index_csv or not llm_phrase_pt or not domain_vocab:
-        raise ValueError("Config must set data.cache_index_csv, data.llm_phrase_pt, data.domain_vocab")
+        raise ValueError("Config must set data.cache_index, data.llm_phrase_pt, data.domain_vocab")
 
     output_dir = get_by_path(cfg, "output.dir", "checkpoints/stage1_cached")
     os.makedirs(output_dir, exist_ok=True)
@@ -393,13 +333,14 @@ def main():
     scheduler_step_on = get_by_path(cfg, "scheduler.step_on", "epoch")
 
     ds = CacheIndexDataset(cache_index_csv)
+    collator = CacheCollator(enc_cfg, int(get_by_path(cfg, "training.image_size", 224)))
     dl = DataLoader(
         ds,
         batch_size=int(get_by_path(cfg, "training.batch_size", 8)),
         shuffle=True,
         num_workers=0,
         pin_memory=(device.type == "cuda"),
-        collate_fn=lambda b: collate_cached(b, enc_cfg, int(get_by_path(cfg, "training.image_size", 224))),
+        collate_fn=collator,
     )
 
     start_epoch = 0
