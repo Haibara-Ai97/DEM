@@ -1,18 +1,39 @@
-seed: 42
-epochs: 24
-batch_size: 4
-num_workers: 4
-lr: 0.005
-weight_decay: 0.0005
-warmup_iters: 500
-lr_step_milestones: [16, 22]
-lr_gamma: 0.1
+data:
+  root: null
+  split_train: train
+  split_val: valid
+  classes_txt: classes.txt
+  num_classes: null
 
-# DEM encoder
-dem_C: 256
-dem_init_gamma: 0.5
-dem_lf_kernel: 7
+output:
+  dir: outputs
 
-# anchors (tune for tiny cracks if needed)
-anchor_sizes: [16, 32, 64, 128]
-aspect_ratios: [0.5, 1.0, 2.0]
+runtime:
+  device: cuda
+
+resume:
+  path: ""
+
+training:
+  seed: 42
+  epochs: 24
+  batch_size: 4
+  num_workers: 4
+  lr: 0.005
+  weight_decay: 0.0005
+  warmup_iters: 500
+  lr_step_milestones: [16, 22]
+  lr_gamma: 0.1
+
+model:
+  name: r50_custom_fpn
+  anchor_sizes: [16, 32, 64, 128]
+  aspect_ratios: [0.5, 1.0, 2.0]
+  dem:
+    C: 256
+    init_gamma: 0.5
+    lf_kernel: 7
+    disable_dem2: false
+    disable_dem3: false
+    disable_dem4: false
+    disable_dem5: false

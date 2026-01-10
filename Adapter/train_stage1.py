@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import yaml
+from dem.config_utils import apply_overrides, get_by_path, load_yaml, write_yaml
 
 from dem.models.backbone import ResNetPyramidBackbone, SimplePyramidBackbone
 from dem.models.da_adapter import DAAdapter, DAAdapterConfig
@@ -161,39 +161,6 @@ def load_encoder_ckpt_by_suffix(encoder: torch.nn.Module, ckpt_path: str):
     print(f"[encoder load] loadable tensors: {len(loadable)}/{len(msd)}")
 
 
-def load_config(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def set_by_path(cfg: dict, key_path: str, value):
-    parts = key_path.split(".")
-    cur = cfg
-    for part in parts[:-1]:
-        if part not in cur or not isinstance(cur[part], dict):
-            cur[part] = {}
-        cur = cur[part]
-    cur[parts[-1]] = value
-
-
-def get_by_path(cfg: dict, key_path: str, default=None):
-    cur = cfg
-    for part in key_path.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            return default
-        cur = cur[part]
-    return cur
-
-
-def apply_overrides(cfg: dict, overrides: list[str]):
-    for item in overrides:
-        if "=" not in item:
-            raise ValueError(f"Override must be key=value, got: {item}")
-        key, raw = item.split("=", 1)
-        value = yaml.safe_load(raw)
-        set_by_path(cfg, key, value)
-
-
 def build_scheduler(optim: torch.optim.Optimizer, cfg: dict):
     sched_type = get_by_path(cfg, "scheduler.type", "none")
     if sched_type == "none":
@@ -214,7 +181,7 @@ def main():
     ap.add_argument("--set", action="append", default=[], help="Override config values with key=value")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    cfg = load_yaml(args.config)
     apply_overrides(cfg, args.set)
 
     cache_index_csv = get_by_path(cfg, "data.cache_index") or get_by_path(cfg, "data.cache_index_csv")
@@ -225,6 +192,7 @@ def main():
 
     output_dir = get_by_path(cfg, "output.dir", "checkpoints/stage1_cached")
     os.makedirs(output_dir, exist_ok=True)
+    write_yaml(Path(output_dir) / "config.yaml", cfg)
 
     seed = int(get_by_path(cfg, "training.seed", 42))
     random.seed(seed)
@@ -245,7 +213,7 @@ def main():
     jsonl_f = None
     if log_enable and (write_log or write_jsonl):
         log_path = Path(log_dir) / f"train_{run_id}.log"
-        jsonl_path = Path(log_dir) / f"metrics_{run_id}.jsonl"
+        jsonl_path = Path(output_dir) / "metrics.jsonl"
 
         if write_log:
             logger = logging.getLogger("train_stage1")
