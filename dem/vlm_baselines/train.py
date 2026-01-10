@@ -14,7 +14,7 @@ Dataset format: one json per line with fields produced by make_concrete_qa_jsonl
   image_path, system, user, assistant, task, split, meta
 
 Multi-GPU: run with torchrun, e.g.
-  torchrun --nproc_per_node=8 train_lora_vlm_baselines.py ...args...
+  torchrun --nproc_per_node=8 -m dem.vlm_baselines.train ...args...
 
 Notes:
   - For Qwen2/2.5-VL, install qwen-vl-utils and (recommended) transformers from source.
@@ -26,8 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -46,6 +44,7 @@ from transformers import (
     set_seed,
 )
 
+from dem.config_utils import load_yaml
 
 # ---------------------------
 # Processor loader (compat for transformers fast/slow processors)
@@ -60,6 +59,38 @@ def safe_auto_processor_from_pretrained(model_id: str, **kwargs):
         return AutoProcessor.from_pretrained(model_id, **kwargs)
 
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "vlm_baselines" / "default.yaml"
+DEFAULT_TRAINING = {
+    "max_length": 512,
+    "epochs": 1.0,
+    "lr": 2e-4,
+    "weight_decay": 0.0,
+    "warmup_ratio": 0.03,
+    "per_device_train_batch_size": 1,
+    "per_device_eval_batch_size": 1,
+    "grad_accum": 8,
+    "max_grad_norm": 1.0,
+    "bf16": False,
+    "fp16": False,
+    "load_in_4bit": False,
+    "gradient_checkpointing": False,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "qwen_min_pixels": 0,
+    "qwen_max_pixels": 0,
+    "qwen_min_tokens": 256,
+    "qwen_max_tokens": 256,
+    "use_slow_processor": False,
+    "seed": 42,
+    "max_train_samples": 0,
+    "max_eval_samples": 0,
+    "logging_steps": 10,
+    "save_steps": 500,
+    "eval_steps": 500,
+}
 
 
 # ---------------------------
@@ -448,57 +479,110 @@ def load_model_and_processor(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_id", type=str, required=True)
+    ap.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
+    ap.add_argument("--model_key", type=str, default="")
+    ap.add_argument("--model_id", type=str)
     ap.add_argument(
         "--family",
         type=str,
-        required=True,
         choices=["qwen2_vl", "qwen2_5_vl", "llava_1_5", "idefics2", "phi3v"],
     )
     ap.add_argument("--train_jsonl", type=str, required=True)
     ap.add_argument("--valid_jsonl", type=str, default="")
     ap.add_argument("--output_dir", type=str, required=True)
 
-    ap.add_argument("--max_length", type=int, default=512)
-    ap.add_argument("--epochs", type=float, default=1.0)
-    ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--weight_decay", type=float, default=0.0)
-    ap.add_argument("--warmup_ratio", type=float, default=0.03)
+    ap.add_argument("--max_length", type=int)
+    ap.add_argument("--epochs", type=float)
+    ap.add_argument("--lr", type=float)
+    ap.add_argument("--weight_decay", type=float)
+    ap.add_argument("--warmup_ratio", type=float)
 
-    ap.add_argument("--per_device_train_batch_size", type=int, default=1)
-    ap.add_argument("--per_device_eval_batch_size", type=int, default=1)
-    ap.add_argument("--grad_accum", type=int, default=8)
-    ap.add_argument("--max_grad_norm", type=float, default=1.0)
+    ap.add_argument("--per_device_train_batch_size", type=int)
+    ap.add_argument("--per_device_eval_batch_size", type=int)
+    ap.add_argument("--grad_accum", type=int)
+    ap.add_argument("--max_grad_norm", type=float)
 
-    ap.add_argument("--bf16", action="store_true")
-    ap.add_argument("--fp16", action="store_true")
-    ap.add_argument("--load_in_4bit", action="store_true")
-    ap.add_argument("--gradient_checkpointing", action="store_true")
+    ap.add_argument("--bf16", action="store_true", default=None)
+    ap.add_argument("--fp16", action="store_true", default=None)
+    ap.add_argument("--load_in_4bit", action="store_true", default=None)
+    ap.add_argument("--gradient_checkpointing", action="store_true", default=None)
 
     # LoRA
-    ap.add_argument("--lora_r", type=int, default=16)
-    ap.add_argument("--lora_alpha", type=int, default=32)
-    ap.add_argument("--lora_dropout", type=float, default=0.05)
+    ap.add_argument("--lora_r", type=int)
+    ap.add_argument("--lora_alpha", type=int)
+    ap.add_argument("--lora_dropout", type=float)
 
     # Qwen visual token budget controls (recommended for stable training)
     # Qwen2/2.5-VL expands one <image> placeholder into many "visual tokens" (default range 4-16384).
     # If your max_length is small (e.g., 512/1024), you MUST cap visual tokens via min_pixels/max_pixels.
     # You can specify either pixels (recommended by official docs) or token counts (converted using 28x28 pixels per token).
-    ap.add_argument("--qwen_min_pixels", type=int, default=0, help="Min pixels for Qwen-VL resizing. 0 = auto by qwen_*_tokens.")
-    ap.add_argument("--qwen_max_pixels", type=int, default=0, help="Max pixels for Qwen-VL resizing. 0 = auto by qwen_*_tokens.")
-    ap.add_argument("--qwen_min_tokens", type=int, default=256, help="Min visual tokens per image for Qwen-VL (converted to pixels).")
-    ap.add_argument("--qwen_max_tokens", type=int, default=256, help="Max visual tokens per image for Qwen-VL (converted to pixels).")
-    ap.add_argument("--use_slow_processor", action="store_true", help="Force slow image processor (use_fast=False).")
+    ap.add_argument("--qwen_min_pixels", type=int, default=None, help="Min pixels for Qwen-VL resizing. 0 = auto by qwen_*_tokens.")
+    ap.add_argument("--qwen_max_pixels", type=int, default=None, help="Max pixels for Qwen-VL resizing. 0 = auto by qwen_*_tokens.")
+    ap.add_argument("--qwen_min_tokens", type=int)
+    ap.add_argument("--qwen_max_tokens", type=int)
+    ap.add_argument("--use_slow_processor", action="store_true", default=None, help="Force slow image processor (use_fast=False).")
 
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--max_train_samples", type=int, default=0)
-    ap.add_argument("--max_eval_samples", type=int, default=0)
+    ap.add_argument("--seed", type=int)
+    ap.add_argument("--max_train_samples", type=int)
+    ap.add_argument("--max_eval_samples", type=int)
 
-    ap.add_argument("--logging_steps", type=int, default=10)
-    ap.add_argument("--save_steps", type=int, default=500)
-    ap.add_argument("--eval_steps", type=int, default=500)
+    ap.add_argument("--logging_steps", type=int)
+    ap.add_argument("--save_steps", type=int)
+    ap.add_argument("--eval_steps", type=int)
 
     args = ap.parse_args()
+
+    cfg = {}
+    if args.config and Path(args.config).exists():
+        cfg = load_yaml(args.config)
+
+    model_cfg = {}
+    if args.model_key:
+        model_cfg = cfg.get("models", {}).get(args.model_key, {})
+    elif "model" in cfg:
+        model_cfg = cfg.get("model", {})
+
+    training_cfg = cfg.get("training", {})
+
+    def _resolve(value, key):
+        if value is not None:
+            return value
+        if key in training_cfg:
+            return training_cfg[key]
+        return DEFAULT_TRAINING[key]
+
+    args.model_id = args.model_id or model_cfg.get("model_id")
+    args.family = args.family or model_cfg.get("family")
+    if not args.model_id or not args.family:
+        raise ValueError("model_id/family must be provided via CLI or config.")
+
+    args.max_length = _resolve(args.max_length, "max_length")
+    args.epochs = _resolve(args.epochs, "epochs")
+    args.lr = _resolve(args.lr, "lr")
+    args.weight_decay = _resolve(args.weight_decay, "weight_decay")
+    args.warmup_ratio = _resolve(args.warmup_ratio, "warmup_ratio")
+    args.per_device_train_batch_size = _resolve(args.per_device_train_batch_size, "per_device_train_batch_size")
+    args.per_device_eval_batch_size = _resolve(args.per_device_eval_batch_size, "per_device_eval_batch_size")
+    args.grad_accum = _resolve(args.grad_accum, "grad_accum")
+    args.max_grad_norm = _resolve(args.max_grad_norm, "max_grad_norm")
+    args.bf16 = _resolve(args.bf16, "bf16")
+    args.fp16 = _resolve(args.fp16, "fp16")
+    args.load_in_4bit = _resolve(args.load_in_4bit, "load_in_4bit")
+    args.gradient_checkpointing = _resolve(args.gradient_checkpointing, "gradient_checkpointing")
+    args.lora_r = _resolve(args.lora_r, "lora_r")
+    args.lora_alpha = _resolve(args.lora_alpha, "lora_alpha")
+    args.lora_dropout = _resolve(args.lora_dropout, "lora_dropout")
+    args.qwen_min_pixels = _resolve(args.qwen_min_pixels, "qwen_min_pixels")
+    args.qwen_max_pixels = _resolve(args.qwen_max_pixels, "qwen_max_pixels")
+    args.qwen_min_tokens = _resolve(args.qwen_min_tokens, "qwen_min_tokens")
+    args.qwen_max_tokens = _resolve(args.qwen_max_tokens, "qwen_max_tokens")
+    args.use_slow_processor = _resolve(args.use_slow_processor, "use_slow_processor")
+    args.seed = _resolve(args.seed, "seed")
+    args.max_train_samples = _resolve(args.max_train_samples, "max_train_samples")
+    args.max_eval_samples = _resolve(args.max_eval_samples, "max_eval_samples")
+    args.logging_steps = _resolve(args.logging_steps, "logging_steps")
+    args.save_steps = _resolve(args.save_steps, "save_steps")
+    args.eval_steps = _resolve(args.eval_steps, "eval_steps")
 
     set_seed(args.seed)
 

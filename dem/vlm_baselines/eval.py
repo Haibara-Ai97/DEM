@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Evaluation script for the concrete QA JSONL dataset (yesno, multilabel, count, grid, json).
-Works with base models or LoRA adapters produced by train_lora_vlm_baselines.py.
+Works with base models or LoRA adapters produced by dem.vlm_baselines.train.
 
 Example:
-  python eval_vlm_baselines.py \
+  python -m dem.vlm_baselines.eval \
     --model_id Qwen/Qwen2.5-VL-7B-Instruct \
     --family qwen2_5_vl \
     --adapter_dir /path/to/lora_out \
@@ -20,7 +20,7 @@ import argparse
 import json
 import math
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,6 +35,22 @@ from transformers import (
 )
 
 from peft import PeftModel
+
+from dem.config_utils import load_yaml
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "vlm_baselines" / "default.yaml"
+DEFAULT_EVAL = {
+    "bf16": False,
+    "qwen_min_pixels": 0,
+    "qwen_max_pixels": 0,
+    "max_samples": 0,
+    "max_new_tokens_yesno": 4,
+    "max_new_tokens_multilabel": 24,
+    "max_new_tokens_count": 8,
+    "max_new_tokens_grid": 8,
+    "max_new_tokens_json": 256,
+}
 
 
 # -------------------------
@@ -329,27 +345,63 @@ class Encoder:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_id", type=str, required=True)
-    ap.add_argument("--family", type=str, required=True,
+    ap.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
+    ap.add_argument("--model_key", type=str, default="")
+    ap.add_argument("--model_id", type=str)
+    ap.add_argument("--family", type=str,
                     choices=["qwen2_vl", "qwen2_5_vl", "llava_1_5", "idefics2", "phi3v"])
     ap.add_argument("--adapter_dir", type=str, default="")
     ap.add_argument("--jsonl", type=str, required=True)
     ap.add_argument("--split", type=str, default="test", choices=["train", "valid", "test"])
 
-    ap.add_argument("--bf16", action="store_true")
+    ap.add_argument("--bf16", action="store_true", default=None)
 
     # Qwen-VL visual token budget (optional, to control visual tokens at eval time)
-    ap.add_argument("--qwen_min_pixels", type=int, default=0)
-    ap.add_argument("--qwen_max_pixels", type=int, default=0)
-    ap.add_argument("--max_samples", type=int, default=0)
+    ap.add_argument("--qwen_min_pixels", type=int)
+    ap.add_argument("--qwen_max_pixels", type=int)
+    ap.add_argument("--max_samples", type=int)
 
-    ap.add_argument("--max_new_tokens_yesno", type=int, default=4)
-    ap.add_argument("--max_new_tokens_multilabel", type=int, default=24)
-    ap.add_argument("--max_new_tokens_count", type=int, default=8)
-    ap.add_argument("--max_new_tokens_grid", type=int, default=8)
-    ap.add_argument("--max_new_tokens_json", type=int, default=256)
+    ap.add_argument("--max_new_tokens_yesno", type=int)
+    ap.add_argument("--max_new_tokens_multilabel", type=int)
+    ap.add_argument("--max_new_tokens_count", type=int)
+    ap.add_argument("--max_new_tokens_grid", type=int)
+    ap.add_argument("--max_new_tokens_json", type=int)
 
     args = ap.parse_args()
+
+    cfg = {}
+    if args.config and Path(args.config).exists():
+        cfg = load_yaml(args.config)
+
+    model_cfg = {}
+    if args.model_key:
+        model_cfg = cfg.get("models", {}).get(args.model_key, {})
+    elif "model" in cfg:
+        model_cfg = cfg.get("model", {})
+
+    eval_cfg = cfg.get("evaluation", {})
+
+    def _resolve(value, key):
+        if value is not None:
+            return value
+        if key in eval_cfg:
+            return eval_cfg[key]
+        return DEFAULT_EVAL[key]
+
+    args.model_id = args.model_id or model_cfg.get("model_id")
+    args.family = args.family or model_cfg.get("family")
+    if not args.model_id or not args.family:
+        raise ValueError("model_id/family must be provided via CLI or config.")
+
+    args.bf16 = _resolve(args.bf16, "bf16")
+    args.qwen_min_pixels = _resolve(args.qwen_min_pixels, "qwen_min_pixels")
+    args.qwen_max_pixels = _resolve(args.qwen_max_pixels, "qwen_max_pixels")
+    args.max_samples = _resolve(args.max_samples, "max_samples")
+    args.max_new_tokens_yesno = _resolve(args.max_new_tokens_yesno, "max_new_tokens_yesno")
+    args.max_new_tokens_multilabel = _resolve(args.max_new_tokens_multilabel, "max_new_tokens_multilabel")
+    args.max_new_tokens_count = _resolve(args.max_new_tokens_count, "max_new_tokens_count")
+    args.max_new_tokens_grid = _resolve(args.max_new_tokens_grid, "max_new_tokens_grid")
+    args.max_new_tokens_json = _resolve(args.max_new_tokens_json, "max_new_tokens_json")
 
     data = read_jsonl(args.jsonl, split=args.split)
     if args.max_samples:
