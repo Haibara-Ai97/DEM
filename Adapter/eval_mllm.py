@@ -20,9 +20,9 @@ Outputs:
   - optionally writes per-example predictions to a jsonl
 
 Assumes the following modules are importable in your repo:
-  from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-  from models.backbone import ResNetPyramidBackbone
-  from models.da_adapter import DAAdapter, DAAdapterConfig
+  from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
+  from dem.models.backbone import ResNetPyramidBackbone
+  from dem.models.da_adapter import DAAdapter, DAAdapterConfig
 """
 
 import argparse
@@ -50,9 +50,9 @@ try:
 except Exception:
     PeftModel = None  # type: ignore
 
-from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-from models.backbone import ResNetPyramidBackbone
-from models.da_adapter import DAAdapter, DAAdapterConfig
+from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
+from dem.models.backbone import ResNetPyramidBackbone
+from dem.models.da_adapter import DAAdapter, DAAdapterConfig
 
 
 # -------------------------
