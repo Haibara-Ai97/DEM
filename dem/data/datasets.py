@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 if TYPE_CHECKING:
-    from dem.models.dem_encoder import DEMEncoderConfig
+    from models.dem_encoder import DEMEncoderConfig
 
 
 CACHE_INDEX_COLUMNS = ("image_path", "cache_path")

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Evaluation script for the concrete QA JSONL dataset (yesno, multilabel, count, grid, json).
-Works with base models or LoRA adapters produced by dem.vlm_baselines.train.
+Works with base models or LoRA adapters produced by scripts.vlm_baselines.train.
 
 Example:
-  python -m dem.vlm_baselines.eval \
+  python -m scripts.vlm_baselines.eval \
     --model_id Qwen/Qwen2.5-VL-7B-Instruct \
     --family qwen2_5_vl \
     --adapter_dir /path/to/lora_out \
@@ -27,16 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from transformers import (
-    AutoProcessor,
-    AutoTokenizer,
-    AutoModelForVision2Seq,
-    AutoModelForCausalLM,
-)
-
-from peft import PeftModel
-
 from dem.config_utils import load_yaml
+from models.vlm_baselines import build_messages_prompt, load_model_and_processor
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "vlm_baselines" / "default.yaml"
@@ -235,69 +227,6 @@ def f1_set(a: List[str], b: List[str]) -> float:
 
 
 # -------------------------
-# Prompt builders
-# -------------------------
-def _base_messages(system_text: str) -> List[Dict[str, Any]]:
-    msgs: List[Dict[str, Any]] = []
-    if system_text:
-        msgs.append({"role": "system", "content": [{"type": "text", "text": system_text}]})
-    return msgs
-
-def build_messages_prompt(sample: Dict[str, Any], family: str) -> List[Dict[str, Any]]:
-    system_text = sample.get("system", "")
-    user_text = sample["user"]
-    img_path = sample["image_path"]
-
-    msgs = _base_messages(system_text)
-
-    if family in ("qwen2_vl", "qwen2_5_vl"):
-        msgs.append({"role": "user", "content": [{"type": "image", "image": img_path}, {"type": "text", "text": user_text}]})
-        return msgs
-    if family == "llava_1_5":
-        msgs.append({"role": "user", "content": [{"type": "text", "text": user_text}, {"type": "image"}]})
-        return msgs
-    if family == "idefics2":
-        msgs.append({"role": "user", "content": [{"type": "image"}, {"type": "text", "text": user_text}]})
-        return msgs
-    if family == "phi3v":
-        placeholder = "<|image_1|>\n"
-        msgs.append({"role": "user", "content": placeholder + user_text})
-        return msgs
-    raise ValueError(f"Unknown family: {family}")
-
-
-# -------------------------
-# Load model
-# -------------------------
-def load_model_and_processor(model_id: str, family: str, adapter_dir: str, bf16: bool, qwen_min_pixels: int = 0, qwen_max_pixels: int = 0):
-    torch_dtype = torch.bfloat16 if bf16 else torch.float16
-
-    if family == "llava_1_5":
-        from transformers import LlavaForConditionalGeneration
-        model = LlavaForConditionalGeneration.from_pretrained(model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
-        processor = AutoProcessor.from_pretrained(model_id, min_pixels=qwen_min_pixels or None, max_pixels=qwen_max_pixels or None)
-        tokenizer = processor.tokenizer
-    elif family in ("qwen2_vl", "qwen2_5_vl", "idefics2"):
-        model = AutoModelForVision2Seq.from_pretrained(model_id, torch_dtype=torch_dtype, trust_remote_code=True, low_cpu_mem_usage=True)
-        processor = AutoProcessor.from_pretrained(model_id)
-        tokenizer = getattr(processor, "tokenizer", AutoTokenizer.from_pretrained(model_id, trust_remote_code=True))
-    elif family == "phi3v":
-        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch_dtype, trust_remote_code=True, low_cpu_mem_usage=True)
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        tokenizer = processor.tokenizer
-    else:
-        raise ValueError(f"Unknown family: {family}")
-
-    if adapter_dir:
-        model = PeftModel.from_pretrained(model, adapter_dir)
-
-    model.eval().cuda()
-    if hasattr(model.config, "use_cache"):
-        model.config.use_cache = True
-    return model, processor, tokenizer
-
-
-# -------------------------
 # Encoding & generation
 # -------------------------
 @dataclass
@@ -319,7 +248,7 @@ class Encoder:
         return self._Image.open(path).convert("RGB")
 
     def build_inputs(self, sample: Dict[str, Any]):
-        msgs = build_messages_prompt(sample, self.family)
+        msgs, _ = build_messages_prompt(sample, self.family)
         if self.family in ("qwen2_vl", "qwen2_5_vl"):
             text = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
             image_inputs, video_inputs = self._qwen_process_vision_info(msgs)

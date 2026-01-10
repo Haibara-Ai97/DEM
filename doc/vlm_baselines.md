@@ -1,8 +1,8 @@
 # VLM Baseline LoRA Runner (Concrete QA JSONL)
 
-VLM baseline scripts have been archived into `dem/vlm_baselines/`:
-- `python -m dem.vlm_baselines.train` : LoRA SFT for several mainstream 4–8B VLMs/MLLMs
-- `python -m dem.vlm_baselines.eval`  : unified evaluation for tasks (yesno/multilabel/count/grid/json)
+VLM baseline scripts live in `scripts/vlm_baselines/`:
+- `python -m scripts.vlm_baselines.train` : LoRA SFT for several mainstream 4–8B VLMs/MLLMs
+- `python -m scripts.vlm_baselines.eval`  : unified evaluation for tasks (yesno/multilabel/count/grid/json)
 
 ## Supported baseline models (IDs)
 
@@ -33,7 +33,7 @@ Assume you have:
 - valid jsonl: `qa_valid.jsonl`
 
 ### Qwen2.5-VL
-torchrun --nproc_per_node=8 -m dem.vlm_baselines.train \
+torchrun --nproc_per_node=8 -m scripts.vlm_baselines.train \
   --model_id Qwen/Qwen2.5-VL-7B-Instruct \
   --family qwen2_5_vl \
   --train_jsonl qa_train.jsonl \
@@ -44,7 +44,7 @@ torchrun --nproc_per_node=8 -m dem.vlm_baselines.train \
   --max_length 512
 
 ### LLaVA-1.5
-torchrun --nproc_per_node=8 -m dem.vlm_baselines.train \
+torchrun --nproc_per_node=8 -m scripts.vlm_baselines.train \
   --model_id llava-hf/llava-1.5-7b-hf \
   --family llava_1_5 \
   --train_jsonl qa_train.jsonl \
@@ -55,7 +55,7 @@ torchrun --nproc_per_node=8 -m dem.vlm_baselines.train \
 
 ## Example evaluation
 
-python -m dem.vlm_baselines.eval \
+python -m scripts.vlm_baselines.eval \
   --model_id Qwen/Qwen2.5-VL-7B-Instruct \
   --family qwen2_5_vl \
   --adapter_dir runs/qwen25vl_lora \
@@ -67,6 +67,6 @@ python -m dem.vlm_baselines.eval \
 Unified defaults live in `configs/vlm_baselines/default.yaml`. You can use them via:
 
 ```bash
-python -m dem.vlm_baselines.train --config configs/vlm_baselines/default.yaml --model_key qwen2_5_vl ...
-python -m dem.vlm_baselines.eval --config configs/vlm_baselines/default.yaml --model_key qwen2_5_vl ...
+python -m scripts.vlm_baselines.train --config configs/vlm_baselines/default.yaml --model_key qwen2_5_vl ...
+python -m scripts.vlm_baselines.eval --config configs/vlm_baselines/default.yaml --model_key qwen2_5_vl ...
 ```

@@ -12,13 +12,15 @@ project/
   apps/
     detection/
       main.py
-      train_det.py
-      eval_det.py
       configs/default.yaml
       datasets/
       models/
       utils/
       outputs/
+  scripts/
+    detection/
+      train_det.py
+      eval_det.py
 
   dataset/
     classes.txt
@@ -231,7 +233,7 @@ aspect_ratios: [0.2, 0.5, 1.0, 2.0, 5.0]
 例如你跑完 24 epoch，想继续到 36：
 
 ```bash
-python train_det.py \
+python scripts/detection/train_det.py \
   --data_root ./dataset \
   --model dem_resnet50 \
   --epochs 36 \

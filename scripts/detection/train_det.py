@@ -10,20 +10,20 @@ import torch
 from torch.utils.data import DataLoader
 from dem.config_utils import apply_overrides, get_by_path, load_yaml, set_by_path, write_yaml
 
-from .datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
-from .models.detector_factory import (
+from apps.detection.datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
+from apps.detection.models.detector_factory import (
     build_baseline_fasterrcnn,
     build_dem_fasterrcnn,
     build_swin_fasterrcnn,
     build_convnext_fasterrcnn,
     build_r50_custom_fasterrcnn,
 )
-from .utils.engine import train_one_epoch, evaluate
-from .utils.misc import set_seed, collate_fn, save_checkpoint
-from .utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
-from .utils.misc import load_checkpoint
+from apps.detection.utils.engine import train_one_epoch, evaluate
+from apps.detection.utils.misc import set_seed, collate_fn, save_checkpoint
+from apps.detection.utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
+from apps.detection.utils.misc import load_checkpoint
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "apps" / "detection" / "configs" / "default.yaml"
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser("Detection Experiment (YOLO folder dataset): Faster R-CNN baseline vs DEM-Encoder backbone")
@@ -43,7 +43,7 @@ def resolve_config_path(path: str | None) -> str | None:
         return None
     if os.path.isabs(path) or os.path.exists(path):
         return path
-    candidate = Path(__file__).resolve().parent / path
+    candidate = Path(__file__).resolve().parents[2] / "apps" / "detection" / path
     if candidate.exists():
         return str(candidate)
     return path
