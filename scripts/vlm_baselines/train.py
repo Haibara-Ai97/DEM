@@ -14,7 +14,7 @@ Dataset format: one json per line with fields produced by make_concrete_qa_jsonl
   image_path, system, user, assistant, task, split, meta
 
 Multi-GPU: run with torchrun, e.g.
-  torchrun --nproc_per_node=8 -m dem.vlm_baselines.train ...args...
+  torchrun --nproc_per_node=8 -m scripts.vlm_baselines.train ...args...
 
 Notes:
   - For Qwen2/2.5-VL, install qwen-vl-utils and (recommended) transformers from source.
@@ -34,7 +34,6 @@ import torch
 from torch.utils.data import Dataset
 
 from transformers import (
-    AutoProcessor,
     AutoTokenizer,
     AutoModelForVision2Seq,
     AutoModelForCausalLM,
@@ -45,18 +44,12 @@ from transformers import (
 )
 
 from dem.config_utils import load_yaml
-
-# ---------------------------
-# Processor loader (compat for transformers fast/slow processors)
-# ---------------------------
-def safe_auto_processor_from_pretrained(model_id: str, **kwargs):
-    """Call AutoProcessor.from_pretrained with best-effort compatibility across Transformers versions."""
-    try:
-        return AutoProcessor.from_pretrained(model_id, **kwargs)
-    except TypeError:
-        # Older/newer versions may not support certain kwargs (e.g., use_fast).
-        kwargs.pop("use_fast", None)
-        return AutoProcessor.from_pretrained(model_id, **kwargs)
+from models.vlm_baselines import (
+    build_messages_full,
+    build_messages_prompt,
+    infer_lora_targets,
+    safe_auto_processor_from_pretrained,
+)
 
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -118,135 +111,6 @@ class ConcreteQADataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.items[idx]
-
-
-# ---------------------------
-# Prompt builders per family
-# ---------------------------
-def _base_messages(system_text: str) -> List[Dict[str, Any]]:
-    msgs: List[Dict[str, Any]] = []
-    if system_text:
-        # Many processors accept system role. If a family ignores it, it is harmless.
-        msgs.append({"role": "system", "content": [{"type": "text", "text": system_text}]})
-    return msgs
-
-
-def build_messages_prompt(sample: Dict[str, Any], family: str) -> Tuple[List[Dict[str, Any]], List[Any]]:
-    """
-    Returns:
-      messages (for apply_chat_template)
-      images_payload (for processor), format depends on family:
-        - qwen2*: uses qwen_vl_utils.process_vision_info(messages) => images_payload is ignored here (empty)
-        - others: images_payload contains PIL images (loaded later in collator)
-    """
-    system_text = sample.get("system", "")
-    user_text = sample["user"]
-    img_path = sample["image_path"]
-
-    msgs = _base_messages(system_text)
-
-    if family in ("qwen2_vl", "qwen2_5_vl"):
-        # Qwen-VL uses its own vision parsing utils; we keep image path in the message.
-        msgs.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": img_path},
-                    {"type": "text", "text": user_text},
-                ],
-            }
-        )
-        return msgs, []
-
-    if family == "llava_1_5":
-        # LLaVA v1.5 prompt places <image> token where {"type":"image"} appears.
-        msgs.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {"type": "image"},
-                ],
-            }
-        )
-        return msgs, [img_path]
-
-    if family == "idefics2":
-        msgs.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": user_text},
-                ],
-            }
-        )
-        return msgs, [img_path]
-
-    if family == "phi3v":
-        # Phi-3.5-vision wants explicit <|image_1|> placeholders in the user content.
-        placeholder = "<|image_1|>\n"
-        msgs.append({"role": "user", "content": placeholder + user_text})
-        return msgs, [img_path]
-
-    raise ValueError(f"Unknown family: {family}")
-
-
-def build_messages_full(sample: Dict[str, Any], family: str) -> Tuple[List[Dict[str, Any]], List[Any]]:
-    msgs, imgs = build_messages_prompt(sample, family)
-    # append assistant supervision
-    assistant_text = sample["assistant"]
-    if family == "phi3v":
-        msgs.append({"role": "assistant", "content": assistant_text})
-    else:
-        msgs.append({"role": "assistant", "content": [{"type": "text", "text": assistant_text}]})
-    return msgs, imgs
-
-
-# ---------------------------
-# LoRA target inference
-# ---------------------------
-def infer_lora_targets(model: torch.nn.Module, family: str) -> List[str]:
-    """
-    Collect Linear module names suitable for LoRA, based on common patterns.
-    We keep this explicit because different backbones name their projections differently.
-    """
-    # Candidate suffixes/substrings by family.
-    # These are intentionally broad; we then filter to Linear modules.
-    patterns_by_family = {
-        "qwen2_vl": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        "qwen2_5_vl": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        "llava_1_5": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        "idefics2": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        # Phi often uses fused projections; keep broad.
-        "phi3v": ["qkv_proj", "q_proj", "k_proj", "v_proj", "o_proj", "dense", "fc1", "fc2", "down_proj", "up_proj"],
-    }
-    patterns = patterns_by_family.get(family, ["q_proj", "k_proj", "v_proj", "o_proj"])
-
-    targets: set[str] = set()
-    for name, module in model.named_modules():
-        if not isinstance(module, torch.nn.Linear):
-            continue
-        for p in patterns:
-            if name.endswith(p) or (("." + p + ".") in ("." + name + ".")) or name.split(".")[-1] == p:
-                targets.add(name.split(".")[-1])
-                break
-
-    # Many PEFT examples pass leaf module names (not full paths).
-    # We return unique leaf names. PEFT will match all occurrences.
-    targets_list = sorted(targets)
-
-    if not targets_list:
-        # Fallback: pick all leaf Linear module names in the model (dangerous but avoids silent no-op).
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                targets.add(name.split(".")[-1])
-        targets_list = sorted(targets)
-
-    if not targets_list:
-        raise RuntimeError("Could not infer LoRA targets (no Linear layers found).")
-
-    return targets_list
 
 
 # ---------------------------

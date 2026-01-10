@@ -6,17 +6,17 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from .datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
-from .models.detector_factory import (
+from apps.detection.datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
+from apps.detection.models.detector_factory import (
     build_baseline_fasterrcnn,
     build_dem_fasterrcnn,
     build_convnext_fasterrcnn,
     build_swin_fasterrcnn,
     build_r50_custom_fasterrcnn,
 )
-from .utils.engine import evaluate
-from .utils.misc import collate_fn, load_checkpoint
-from .utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
+from apps.detection.utils.engine import evaluate
+from apps.detection.utils.misc import collate_fn, load_checkpoint
+from apps.detection.utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser("Evaluate Faster R-CNN on YOLO folder dataset (COCO metrics via generated GT dict)")

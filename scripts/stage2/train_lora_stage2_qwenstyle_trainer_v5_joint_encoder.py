@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Trainer-based Stage-2 LoRA fine-tuning (Qwen-style) for:
-  - Your custom DEM Vision Encoder (frozen by default; can be unfrozen for joint tuning)
-  - Your custom DA Adapter (frozen by default, initialized from Stage-1 checkpoint)
-  - Qwen2.5 LLM with LoRA (trainable)
+Stage-2 LoRA fine-tuning (Trainer-based, Qwen2.5-7B LLM) with joint tuning options:
+  - Your custom Vision Encoder (DEMVisionBackbone) : frozen by default, can be unfrozen
+  - Your custom DAAdapter                         : frozen by default, can be unfrozen
+  - Qwen2.5-7B-Instruct LLM + LoRA                : trainable (LoRA params)
 
-This script aligns with the *loading conventions* in your current DDP script:
-  1) Encoder weights: robust extraction + suffix-key matching (handles "module.", "encoder.", etc.)
-  2) Adapter weights: loaded from a Stage-1 checkpoint dict with key "adapter" (and strips "module.")
+This file fixes two critical issues that can make training "not start":
+  1) All training logic is inside main() (no accidental dedent/early-return).
+  2) VisionPrefixQwen properly defines train() and forward() as class methods.
 
-JSONL dataset format:
+JSONL format per line:
   {"image_path": "...", "system": "...", "user": "...", "assistant": "...", ...}
 
-Example (multi-GPU):
-  torchrun --nproc_per_node 8 train_lora_stage2_qwenstyle_trainer_v2.py \
-    --train_jsonl /path/to/train.jsonl \
-    --output_dir /path/to/out \
+Example:
+  torchrun --nproc_per_node=8 train_lora_stage2_qwenstyle_trainer_v5_joint_encoder.py \
+    --train_jsonl /path/train.jsonl \
+    --output_dir /path/out \
     --llm_name Qwen/Qwen2.5-7B-Instruct \
-    --stage1_ckpt /path/to/stage1.pt \
-    --encoder_ckpt /path/to/encoder.pt \
-    --use_lora --freeze_encoder --freeze_adapter \
-    --per_device_train_batch_size 1 --gradient_accumulation_steps 8 \
-    --num_train_epochs 1 --learning_rate 2e-4 --bf16
+    --stage1_ckpt /path/stage1.pt \
+    --encoder_ckpt /path/encoder_best.pth \
+    --use_lora \
+    --no_freeze_encoder --encoder_lr 2e-5 \
+    --num_train_epochs 1 --per_device_train_batch_size 1 --gradient_accumulation_steps 8 \
+    --max_text_len 512 --bf16
 """
 
 import argparse
@@ -51,17 +52,15 @@ from transformers import (
 
 from peft import LoraConfig, get_peft_model, TaskType
 
-# ---- Your project modules (same as your DDP script) ----
-from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-from dem.models.backbone import ResNetPyramidBackbone
-from dem.models.da_adapter import DAAdapter, DAAdapterConfig
-
+# ---- Your project modules (same import paths as your existing script) ----
+from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone, ResNetPyramidBackbone
+from models.da_adapter import DAAdapter, DAAdapterConfig
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 # -------------------------
-# Utils: image preprocessing (match DEMEncoderConfig)
+# Image preprocessing (match DEMEncoderConfig)
 # -------------------------
 def pil_resize_square(img: Image.Image, size: int) -> Image.Image:
     return img.resize((size, size), resample=Image.BICUBIC)
@@ -79,18 +78,15 @@ def normalize(t: torch.Tensor, mean: Tuple[float, float, float], std: Tuple[floa
     return (t - m) / s
 
 
-
 def freeze_batchnorm_stats(module: nn.Module) -> None:
-    """Put all BatchNorm layers into eval mode (freeze running stats).
-    Useful when per-GPU batch size is small to avoid unstable BN updates.
-    """
+    """Freeze BatchNorm running stats by forcing BN layers to eval()."""
     for m in module.modules():
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
             m.eval()
 
 
 # -------------------------
-# Utils: checkpoint loading (match your DDP script)
+# Checkpoint loading (robust, suffix matching)
 # -------------------------
 def _strip_prefix(sd: Dict[str, torch.Tensor], prefix: str = "module.") -> Dict[str, torch.Tensor]:
     if not isinstance(sd, dict):
@@ -104,16 +100,7 @@ def _is_tensor_state_dict(d: Any) -> bool:
     return isinstance(d, dict) and len(d) > 0 and all(isinstance(v, torch.Tensor) for v in d.values())
 
 
-def _extract_state_dict(
-    ckpt: Any,
-    key: Optional[str] = None,
-    fallback_keys: Optional[List[str]] = None,
-) -> Dict[str, torch.Tensor]:
-    """
-    Extract a state_dict from arbitrary checkpoint formats:
-      - raw state_dict
-      - dict with nested keys: state_dict/model/net/ema/encoder/adapter...
-    """
+def _extract_state_dict(ckpt: Any, key: Optional[str] = None, fallback_keys: Optional[List[str]] = None) -> Dict[str, torch.Tensor]:
     if fallback_keys is None:
         fallback_keys = ["state_dict", "model", "net", "ema", "encoder", "adapter"]
 
@@ -127,7 +114,6 @@ def _extract_state_dict(
             if k in ckpt and isinstance(ckpt[k], dict) and _is_tensor_state_dict(ckpt[k]):
                 return ckpt[k]
 
-        # last resort: sometimes dict itself is almost a state_dict but may include non-tensor fields
         tensor_items = {k: v for k, v in ckpt.items() if isinstance(v, torch.Tensor)}
         if len(tensor_items) > 0:
             return tensor_items
@@ -141,13 +127,6 @@ def load_encoder_ckpt_by_suffix(
     map_location: str = "cpu",
     ckpt_key: Optional[str] = None,
 ) -> None:
-    """
-    Mirrors your DDP script logic:
-      - extract state_dict
-      - strip 'module.'
-      - load exact-name matches first
-      - then suffix matches to handle different prefixes
-    """
     ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
     sd = _extract_state_dict(ckpt, key=ckpt_key, fallback_keys=["state_dict", "model", "net", "ema", "encoder"])
     sd = _strip_prefix(sd, "module.")
@@ -155,12 +134,12 @@ def load_encoder_ckpt_by_suffix(
     msd = encoder.state_dict()
     loadable: Dict[str, torch.Tensor] = {}
 
-    # 1) exact key match
+    # exact match
     for k, v in sd.items():
         if k in msd and msd[k].shape == v.shape:
             loadable[k] = v
 
-    # 2) suffix match if still missing a lot
+    # suffix match
     if len(loadable) < int(len(msd) * 0.8):
         sd_keys = list(sd.keys())
         for mk in msd.keys():
@@ -175,7 +154,7 @@ def load_encoder_ckpt_by_suffix(
                 loadable[mk] = v
 
     encoder.load_state_dict(loadable, strict=False)
-    if os.environ.get("RANK", "0") == "0":
+    if int(os.environ.get("RANK", "0")) == 0:
         print(f"[encoder load] {ckpt_path} | loadable: {len(loadable)}/{len(msd)}", flush=True)
 
 
@@ -190,7 +169,7 @@ def load_adapter_from_stage1(
     sd = _extract_state_dict(ckpt, key=key, fallback_keys=[key, "state_dict", "model", "net", "ema", "adapter"])
     sd = _strip_prefix(sd, "module.")
     adapter.load_state_dict(sd, strict=strict)
-    if os.environ.get("RANK", "0") == "0":
+    if int(os.environ.get("RANK", "0")) == 0:
         print(f"[adapter load] {stage1_ckpt_path} | key='{key}' | strict={strict}", flush=True)
 
 
@@ -216,16 +195,9 @@ class JsonlSFTDataset(Dataset):
         return ex, img
 
 
-def build_input_and_labels(
-    tokenizer,
-    system: str,
-    user: str,
-    assistant: str,
-    max_len: int,
-):
+def build_input_and_labels(tokenizer, system: str, user: str, assistant: str, max_len: int):
     """
-    Prefer tokenizer.apply_chat_template if available.
-    Create labels masking system+user (prompt) tokens, only learn assistant tokens.
+    Build full ids and prompt ids; labels mask prompt tokens.
     """
     if hasattr(tokenizer, "apply_chat_template"):
         msgs_full = [
@@ -238,22 +210,44 @@ def build_input_and_labels(
             {"role": "user", "content": user},
         ]
 
-        full_ids = tokenizer.apply_chat_template(
+        def _to_1d_tensor(x):
+            # x may be: BatchEncoding, torch.Tensor, list[int], tokenizers.Encoding, or list[Encoding]
+            if isinstance(x, torch.Tensor):
+                ids = x
+            elif isinstance(x, dict) and "input_ids" in x:
+                ids = x["input_ids"]
+            elif hasattr(x, "input_ids"):
+                ids = x.input_ids
+            elif hasattr(x, "ids"):  # tokenizers.Encoding
+                ids = torch.tensor(x.ids, dtype=torch.long)
+            else:
+                ids = torch.tensor(x, dtype=torch.long)
+
+            if isinstance(ids, (list, tuple)):
+                ids = torch.tensor(ids, dtype=torch.long)
+            if isinstance(ids, torch.Tensor) and ids.dim() == 2:
+                ids = ids[0]
+            return ids
+
+        full_out = tokenizer.apply_chat_template(
             msgs_full, tokenize=True, add_generation_prompt=False, return_tensors="pt"
-        )[0]
-        prompt_ids = tokenizer.apply_chat_template(
+        )
+        prompt_out = tokenizer.apply_chat_template(
             msgs_prompt, tokenize=True, add_generation_prompt=True, return_tensors="pt"
-        )[0]
+        )
+
+        full_ids = _to_1d_tensor(full_out)
+        prompt_ids = _to_1d_tensor(prompt_out)
 
         full_ids = full_ids[:max_len]
         attn = torch.ones_like(full_ids, dtype=torch.long)
 
         labels = full_ids.clone()
-        pl = min(prompt_ids.numel(), labels.numel())
+        pl = min(int(prompt_ids.numel()), int(labels.numel()))
         labels[:pl] = -100
         return full_ids, attn, labels
 
-    # Fallback
+    # fallback
     text = f"System: {system}\nUser: {user}\nAssistant: {assistant}"
     enc = tokenizer(text, truncation=True, max_length=max_len, return_tensors="pt")
     input_ids = enc["input_ids"][0]
@@ -312,7 +306,7 @@ class DataCollatorSFT:
 
 
 # -------------------------
-# Model: vision prefix + Qwen
+# Model: vision prefix + LLM
 # -------------------------
 class VisionPrefixQwen(nn.Module):
     def __init__(
@@ -321,7 +315,7 @@ class VisionPrefixQwen(nn.Module):
         adapter: nn.Module,
         llm: nn.Module,
         feat_key: str = "0",
-        prefix_grid: int = 8,   # prefix tokens = prefix_grid^2
+        prefix_grid: int = 8,
         freeze_encoder_bn: bool = True,
     ):
         super().__init__()
@@ -332,20 +326,16 @@ class VisionPrefixQwen(nn.Module):
         self.prefix_grid = prefix_grid
         self.freeze_encoder_bn = freeze_encoder_bn
 
-
     def train(self, mode: bool = True):
-        # Let Trainer toggle train/eval globally, then force frozen parts to stay in eval.
         super().train(mode)
 
-        # If encoder is frozen, keep it in eval to avoid Dropout/BN updates.
+        # keep frozen encoder/adapter deterministic
         if not any(p.requires_grad for p in self.encoder.parameters()):
             self.encoder.eval()
         else:
-            # If encoder is trainable but BN stats should be frozen, force BN layers to eval.
             if self.freeze_encoder_bn:
                 freeze_batchnorm_stats(self.encoder)
 
-        # Same logic for adapter (often you want deterministic prefix features when adapter is frozen).
         if not any(p.requires_grad for p in self.adapter.parameters()):
             self.adapter.eval()
 
@@ -359,11 +349,10 @@ class VisionPrefixQwen(nn.Module):
         labels: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        feats = self.encoder(images)  # OrderedDict[str, (B,C,Hf,Wf)]
-        feat = feats[self.feat_key]   # (B,C,Hf,Wf)
-
+        feats = self.encoder(images)
+        feat = feats[self.feat_key]
         feat = F.adaptive_avg_pool2d(feat, output_size=(self.prefix_grid, self.prefix_grid))
-        vtok = self.adapter(feat)  # (B, N, D), N=prefix_grid^2
+        vtok = self.adapter(feat)  # (B, N, D)
 
         tok_emb = self.llm.get_input_embeddings()(input_ids)  # (B,L,D)
         vtok = vtok.to(dtype=tok_emb.dtype)
@@ -374,18 +363,16 @@ class VisionPrefixQwen(nn.Module):
         prefix_mask = torch.ones((B, N), device=attention_mask.device, dtype=attention_mask.dtype)
         attn = torch.cat([prefix_mask, attention_mask], dim=1)
 
+        lab = None
         if labels is not None:
             prefix_labels = torch.full((B, N), -100, device=labels.device, dtype=labels.dtype)
             lab = torch.cat([prefix_labels, labels], dim=1)
-        else:
-            lab = None
 
-        out = self.llm(inputs_embeds=inputs_embeds, attention_mask=attn, labels=lab)
-        return out
+        return self.llm(inputs_embeds=inputs_embeds, attention_mask=attn, labels=lab)
 
 
 # -------------------------
-# Trainer with param groups (optional)
+# Trainer with param groups
 # -------------------------
 class MultiGroupTrainer(Trainer):
     def create_optimizer(self):
@@ -395,11 +382,7 @@ class MultiGroupTrainer(Trainer):
         model = self.model
         lr = self.args.learning_rate
 
-        # Identify param groups
-        adapter_params = []
-        encoder_params = []
-        other_params = []
-
+        adapter_params, encoder_params, other_params = [], [], []
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
@@ -411,103 +394,18 @@ class MultiGroupTrainer(Trainer):
                 other_params.append(p)
 
         groups = []
-        if len(other_params) > 0:
+        if other_params:
             groups.append({"params": other_params, "lr": lr})
-        # Use args in TrainingArguments via `--adapter_lr` and `--encoder_lr` (we pass into TrainingArguments as lr? no),
-        # so we stash them on self via trainer init kwargs.
-        if len(adapter_params) > 0:
+        if adapter_params:
             groups.append({"params": adapter_params, "lr": getattr(self, "_adapter_lr", lr)})
-        if len(encoder_params) > 0:
+        if encoder_params:
             groups.append({"params": encoder_params, "lr": getattr(self, "_encoder_lr", lr)})
 
         from torch.optim import AdamW
-        self.optimizer = AdamW(groups, betas=(0.9, 0.999), eps=1e-8, weight_decay=self.args.weight_decay)
+        self.optimizer = AdamW(
+            groups, betas=(0.9, 0.999), eps=1e-8, weight_decay=self.args.weight_decay
+        )
         return self.optimizer
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-
-    # Data
-    p.add_argument("--train_jsonl", type=str, required=True)
-    p.add_argument("--image_size", type=int, default=224)
-    p.add_argument("--max_text_len", type=int, default=512)
-
-    # LLM
-    p.add_argument("--llm_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
-    p.add_argument("--torch_dtype", type=str, default="auto", choices=["auto", "float16", "bfloat16", "float32"])
-    p.add_argument("--attn_implementation", type=str, default=None, help="e.g., flash_attention_2 (if available)")
-
-    # Stage-1 / pretrained weights (match your DDP script naming)
-    p.add_argument("--stage1_ckpt", type=str, required=True, help="Stage-1 checkpoint containing adapter weights (key 'adapter').")
-    p.add_argument("--stage1_adapter_key", type=str, default="adapter")
-    p.add_argument("--adapter_strict", action="store_true", help="Strictly load adapter weights (default True).")
-    p.add_argument("--no_adapter_strict", action="store_false", dest="adapter_strict")
-    p.set_defaults(adapter_strict=True)
-
-    p.add_argument("--encoder_ckpt", type=str, default="", help="Path to pretrained DEM-Encoder checkpoint used in stage1.")
-    p.add_argument("--encoder_ckpt_key", type=str, default="", help="Key name for encoder state dict if ckpt is a dict.")
-    p.add_argument("--ckpt_map_location", type=str, default="cpu")
-
-    # Vision config switches (same as your DDP script)
-    p.add_argument("--backbone_pretrained", action="store_true", default=True)
-    p.add_argument("--no_backbone_pretrained", action="store_false", dest="backbone_pretrained")
-    p.add_argument("--disable_dem2", action="store_true")
-    p.add_argument("--disable_dem3", action="store_true")
-    p.add_argument("--disable_dem4", action="store_true")
-    p.add_argument("--disable_dem5", action="store_true")
-
-    # Prefix tokens
-    p.add_argument("--feat_key", type=str, default="0", choices=["0", "1", "2", "3"])
-    p.add_argument("--prefix_grid", type=int, default=8)
-
-    # Freeze controls (Stage-2 default: freeze encoder+adapter; train LoRA)
-    # NOTE: Provide explicit --no_freeze_* switches so you can jointly tune encoder/adapter.
-    p.add_argument("--freeze_encoder", action="store_true", help="Freeze encoder weights (default: True).")
-    p.add_argument("--no_freeze_encoder", action="store_false", dest="freeze_encoder", help="Unfreeze encoder weights.")
-    p.add_argument("--freeze_adapter", action="store_true", help="Freeze adapter weights (default: True).")
-    p.add_argument("--no_freeze_adapter", action="store_false", dest="freeze_adapter", help="Unfreeze adapter weights.")
-    p.set_defaults(freeze_encoder=True, freeze_adapter=True)
-
-    # When unfreezing encoder with small per-GPU batch size, BatchNorm running stats can be unstable.
-    p.add_argument("--freeze_encoder_bn", action="store_true", help="Freeze encoder BatchNorm running stats (default: True).")
-    p.add_argument("--no_freeze_encoder_bn", action="store_false", dest="freeze_encoder_bn", help="Update encoder BatchNorm running stats.")
-    p.set_defaults(freeze_encoder_bn=True)
-
-    # Optional: only train a subset of encoder parameters by regex (applies only when encoder is unfrozen).
-    # Example: --encoder_train_regex "dem5|transformer\.blocks\.11"
-    p.add_argument("--encoder_train_regex", type=str, default="", help="Regex filter for encoder params to train.")
-
-    # LoRA
-    p.add_argument("--use_lora", action="store_true")
-    p.add_argument("--lora_r", type=int, default=16)
-    p.add_argument("--lora_alpha", type=int, default=64)
-    p.add_argument("--lora_dropout", type=float, default=0.05)
-
-    # Optim / Trainer
-    p.add_argument("--output_dir", type=str, required=True)
-    p.add_argument("--num_train_epochs", type=float, default=1.0)
-    p.add_argument("--per_device_train_batch_size", type=int, default=1)
-    p.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    p.add_argument("--learning_rate", type=float, default=2e-4, help="LR for LLM (LoRA)")
-    p.add_argument("--adapter_lr", type=float, default=1e-4)
-    p.add_argument("--encoder_lr", type=float, default=2e-5)
-    p.add_argument("--weight_decay", type=float, default=0.01)
-    p.add_argument("--warmup_ratio", type=float, default=0.03)
-    p.add_argument("--lr_scheduler_type", type=str, default="cosine")
-    p.add_argument("--max_grad_norm", type=float, default=0.3, help="Gradient clipping norm (recommend 0.3 when tuning encoder).")
-
-    p.add_argument("--logging_steps", type=int, default=20)
-    p.add_argument("--save_steps", type=int, default=500)
-    p.add_argument("--save_total_limit", type=int, default=2)
-    p.add_argument("--dataloader_num_workers", type=int, default=4)
-    p.add_argument("--seed", type=int, default=42)
-
-    p.add_argument("--bf16", action="store_true")
-    p.add_argument("--fp16", action="store_true")
-    p.add_argument("--deepspeed", type=str, default=None)
-
-    return p.parse_args()
 
 
 def _torch_dtype_from_arg(arg: str):
@@ -522,11 +420,118 @@ def _torch_dtype_from_arg(arg: str):
     raise ValueError(f"Unknown torch_dtype: {arg}")
 
 
+def parse_args():
+    p = argparse.ArgumentParser()
+
+    # Data
+    p.add_argument("--train_jsonl", type=str, required=True)
+    p.add_argument("--image_size", type=int, default=224)
+    p.add_argument("--max_text_len", type=int, default=512)
+
+    # LLM
+    p.add_argument("--llm_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--torch_dtype", type=str, default="auto", choices=["auto", "float16", "bfloat16", "float32"])
+    p.add_argument("--attn_implementation", type=str, default=None)
+
+    # ckpts
+    p.add_argument("--stage1_ckpt", type=str, required=True)
+    p.add_argument("--stage1_adapter_key", type=str, default="adapter")
+    p.add_argument("--adapter_strict", action="store_true")
+    p.add_argument("--no_adapter_strict", action="store_false", dest="adapter_strict")
+    p.set_defaults(adapter_strict=True)
+
+    p.add_argument("--encoder_ckpt", type=str, default="")
+    p.add_argument("--encoder_ckpt_key", type=str, default="")
+    p.add_argument("--ckpt_map_location", type=str, default="cpu")
+
+    # Vision config switches
+    p.add_argument("--backbone_pretrained", action="store_true", default=True)
+    p.add_argument("--no_backbone_pretrained", action="store_false", dest="backbone_pretrained")
+    p.add_argument("--disable_dem2", action="store_true")
+    p.add_argument("--disable_dem3", action="store_true")
+    p.add_argument("--disable_dem4", action="store_true")
+    p.add_argument("--disable_dem5", action="store_true")
+
+    # Prefix
+    p.add_argument("--feat_key", type=str, default="0", choices=["0", "1", "2", "3"])
+    p.add_argument("--prefix_grid", type=int, default=8)
+
+    # Freeze controls
+    p.add_argument("--freeze_encoder", action="store_true")
+    p.add_argument("--no_freeze_encoder", action="store_false", dest="freeze_encoder")
+    p.add_argument("--freeze_adapter", action="store_true")
+    p.add_argument("--no_freeze_adapter", action="store_false", dest="freeze_adapter")
+    p.set_defaults(freeze_encoder=True, freeze_adapter=True)
+
+    p.add_argument("--freeze_encoder_bn", action="store_true")
+    p.add_argument("--no_freeze_encoder_bn", action="store_false", dest="freeze_encoder_bn")
+    p.set_defaults(freeze_encoder_bn=True)
+
+    p.add_argument("--encoder_train_regex", type=str, default="")
+
+    # LoRA
+    p.add_argument("--use_lora", action="store_true")
+    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=64)
+    p.add_argument("--lora_dropout", type=float, default=0.05)
+    p.add_argument("--lora_target", type=str, default="qkvomlp",
+                   help="qv|qkv|qkvo|qkvomlp (default)")
+
+    # Optim/Trainer
+    p.add_argument("--output_dir", type=str, required=True)
+    p.add_argument("--num_train_epochs", type=float, default=1.0)
+    p.add_argument("--per_device_train_batch_size", type=int, default=1)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    p.add_argument("--learning_rate", type=float, default=2e-4)
+    p.add_argument("--adapter_lr", type=float, default=1e-4)
+    p.add_argument("--encoder_lr", type=float, default=2e-5)
+    p.add_argument("--weight_decay", type=float, default=0.01)
+    p.add_argument("--warmup_ratio", type=float, default=0.03)
+    p.add_argument("--lr_scheduler_type", type=str, default="cosine")
+    p.add_argument("--max_grad_norm", type=float, default=0.3)
+
+    p.add_argument("--logging_steps", type=int, default=20)
+    p.add_argument("--save_steps", type=int, default=500)
+    p.add_argument("--save_total_limit", type=int, default=2)
+    p.add_argument("--dataloader_num_workers", type=int, default=4)
+    p.add_argument("--seed", type=int, default=42)
+
+    p.add_argument("--bf16", action="store_true")
+    p.add_argument("--fp16", action="store_true")
+    p.add_argument("--deepspeed", type=str, default=None)
+
+    return p.parse_args()
+
+
+def _pick_lora_targets(mode: str) -> List[str]:
+    mode = (mode or "").lower()
+    if mode == "qv":
+        return ["q_proj", "v_proj"]
+    if mode == "qkv":
+        return ["q_proj", "k_proj", "v_proj"]
+    if mode == "qkvo":
+        return ["q_proj", "k_proj", "v_proj", "o_proj"]
+    # default: qkv + o + mlp
+    return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+def _count_trainable(model: nn.Module) -> Tuple[int, int]:
+    trainable = 0
+    total = 0
+    for p in model.parameters():
+        n = p.numel()
+        total += n
+        if p.requires_grad:
+            trainable += n
+    return trainable, total
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
-
     os.makedirs(args.output_dir, exist_ok=True)
+
+    rank0 = int(os.environ.get("RANK", "0")) == 0
 
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.llm_name, use_fast=True, trust_remote_code=True)
@@ -534,30 +539,27 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # LLM
-    model_kwargs = dict(
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-    )
+    model_kwargs = dict(trust_remote_code=True, low_cpu_mem_usage=True)
     td = _torch_dtype_from_arg(args.torch_dtype)
     if td != "auto":
         model_kwargs["torch_dtype"] = td
     if args.attn_implementation:
         model_kwargs["attn_implementation"] = args.attn_implementation
-
     llm = AutoModelForCausalLM.from_pretrained(args.llm_name, **model_kwargs)
 
     # LoRA
     if args.use_lora:
+        targets = _pick_lora_targets(args.lora_target)
         lora_cfg = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            target_modules=targets,
         )
         llm = get_peft_model(llm, lora_cfg)
 
-    # Vision encoder (match your DDP script)
+    # Vision encoder
     enc_cfg = DEMEncoderConfig()
     pyramid = ResNetPyramidBackbone(name="resnet50", pretrained=args.backbone_pretrained)
     encoder = DEMVisionBackbone(
@@ -569,16 +571,13 @@ def main():
         disable_dem5=args.disable_dem5,
     )
 
-    # Load encoder ckpt (optional)
     if args.encoder_ckpt:
         key = args.encoder_ckpt_key.strip() or None
         load_encoder_ckpt_by_suffix(encoder, args.encoder_ckpt, map_location=args.ckpt_map_location, ckpt_key=key)
 
-    # Adapter (match your DDP script)
+    # Adapter
     llm_dim = llm.get_input_embeddings().weight.shape[1]
     adapter = DAAdapter(DAAdapterConfig(in_channels=encoder.out_channels, llm_dim=llm_dim))
-
-    # Load adapter from stage1
     load_adapter_from_stage1(
         adapter,
         args.stage1_ckpt,
@@ -587,20 +586,19 @@ def main():
         strict=args.adapter_strict,
     )
 
-    
-    # Freeze / unfreeze controls
+    # Freeze / unfreeze
     if args.freeze_encoder:
         encoder.eval()
         for p in encoder.parameters():
             p.requires_grad = False
     else:
         encoder.train()
-        for name, p in encoder.named_parameters():
+        for n, p in encoder.named_parameters():
             p.requires_grad = True
         if args.encoder_train_regex.strip():
             rgx = re.compile(args.encoder_train_regex.strip())
-            for name, p in encoder.named_parameters():
-                p.requires_grad = bool(rgx.search(name))
+            for n, p in encoder.named_parameters():
+                p.requires_grad = bool(rgx.search(n))
         if args.freeze_encoder_bn:
             freeze_batchnorm_stats(encoder)
 
@@ -613,83 +611,85 @@ def main():
         for p in adapter.parameters():
             p.requires_grad = True
 
-        # Build multimodal wrapper
-        mm_model = VisionPrefixQwen(
-            encoder=encoder,
-            adapter=adapter,
-            llm=llm,
-            feat_key=args.feat_key,
-            prefix_grid=args.prefix_grid,
-            freeze_encoder_bn=args.freeze_encoder_bn,
-        )
+    # Wrap
+    mm_model = VisionPrefixQwen(
+        encoder=encoder,
+        adapter=adapter,
+        llm=llm,
+        feat_key=args.feat_key,
+        prefix_grid=args.prefix_grid,
+        freeze_encoder_bn=args.freeze_encoder_bn,
+    )
 
-        # Data
-        train_ds = JsonlSFTDataset(args.train_jsonl)
-        collator = DataCollatorSFT(
-            tokenizer=tokenizer,
-            enc_cfg=enc_cfg,
-            image_size=args.image_size,
-            max_text_len=args.max_text_len,
-        )
+    # Data
+    train_ds = JsonlSFTDataset(args.train_jsonl)
+    if rank0:
+        print(f"[data] train size = {len(train_ds)}", flush=True)
 
-        # TrainingArguments
-        targs = TrainingArguments(
-            output_dir=args.output_dir,
-            num_train_epochs=args.num_train_epochs,
-            per_device_train_batch_size=args.per_device_train_batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-            warmup_ratio=args.warmup_ratio,
-            lr_scheduler_type=args.lr_scheduler_type,
-            max_grad_norm=args.max_grad_norm,
-            logging_steps=args.logging_steps,
-            save_steps=args.save_steps,
-            save_total_limit=args.save_total_limit,
-            bf16=args.bf16,
-            fp16=args.fp16,
-            dataloader_num_workers=args.dataloader_num_workers,
-            remove_unused_columns=False,  # IMPORTANT for image tensors
-            report_to=[],                 # no wandb by default
-            deepspeed=args.deepspeed,
-        )
+    collator = DataCollatorSFT(
+        tokenizer=tokenizer,
+        enc_cfg=enc_cfg,
+        image_size=args.image_size,
+        max_text_len=args.max_text_len,
+    )
 
+    # TrainingArguments
+    targs = TrainingArguments(
+        output_dir=args.output_dir,
+        num_train_epochs=args.num_train_epochs,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        warmup_ratio=args.warmup_ratio,
+        lr_scheduler_type=args.lr_scheduler_type,
+        max_grad_norm=args.max_grad_norm,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        bf16=args.bf16,
+        fp16=args.fp16,
+        dataloader_num_workers=args.dataloader_num_workers,
+        remove_unused_columns=False,
+        report_to=[],
+        deepspeed=args.deepspeed,
+    )
 
-        # Build Trainer with compatibility across transformers versions (tokenizer arg was removed in recent versions).
-        import inspect as _inspect
-        _trainer_kwargs = dict(
-                model=mm_model,
-                args=targs,
-                train_dataset=train_ds,
-                data_collator=collator,
-        )
-        _sig = _inspect.signature(Trainer.__init__)
-        if "tokenizer" in _sig.parameters:
-            _trainer_kwargs["tokenizer"] = tokenizer
-        trainer = MultiGroupTrainer(**_trainer_kwargs)
+    # Trainer (tokenizer kwarg compatibility)
+    import inspect as _inspect
+    _trainer_kwargs = dict(
+        model=mm_model,
+        args=targs,
+        train_dataset=train_ds,
+        data_collator=collator,
+    )
+    _sig = _inspect.signature(Trainer.__init__)
+    if "tokenizer" in _sig.parameters:
+        _trainer_kwargs["tokenizer"] = tokenizer
 
-        # stash group lrs
-        trainer._adapter_lr = args.adapter_lr
-        trainer._encoder_lr = args.encoder_lr
+    trainer = MultiGroupTrainer(**_trainer_kwargs)
+    trainer._adapter_lr = args.adapter_lr
+    trainer._encoder_lr = args.encoder_lr
 
-        trainer.train()
+    if rank0:
+        trn, tot = _count_trainable(mm_model)
+        print(f"[trainable] {trn:,} / {tot:,} ({100.0*trn/tot:.4f}%)", flush=True)
+        print("[train] calling trainer.train() ...", flush=True)
 
-        # Save tokenizer and (if using LoRA) the PEFT weights
-        if trainer.is_world_process_zero():
-            tokenizer.save_pretrained(args.output_dir)
+    trainer.train()
 
-            # Save Adapter snapshot (always)
-            torch.save({"adapter": adapter.state_dict()}, Path(args.output_dir) / "da_adapter.pt")
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(args.output_dir)
 
-            # Save encoder snapshot only if it is trainable
-            if any(p.requires_grad for p in encoder.parameters()):
-                torch.save({"encoder": encoder.state_dict()}, Path(args.output_dir) / "dem_encoder.pt")
+        torch.save({"adapter": adapter.state_dict()}, Path(args.output_dir) / "da_adapter.pt")
+        if any(p.requires_grad for p in encoder.parameters()):
+            torch.save({"encoder": encoder.state_dict()}, Path(args.output_dir) / "dem_encoder.pt")
 
-            # Save LoRA/LLM
-            if args.use_lora and hasattr(llm, "save_pretrained"):
-                llm.save_pretrained(Path(args.output_dir) / "lora_llm")
+        # Save LoRA/LLM
+        if args.use_lora and hasattr(llm, "save_pretrained"):
+            llm.save_pretrained(Path(args.output_dir) / "lora_llm")
 
-            print(f"[save] outputs written to: {args.output_dir}", flush=True)
+        print(f"[save] outputs written to: {args.output_dir}", flush=True)
 
 
 if __name__ == "__main__":

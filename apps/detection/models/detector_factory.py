@@ -8,7 +8,7 @@ from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
 
 from .resnet_pyramid import ResNetPyramidBackbone
-from dem.models import DEMVisionBackbone, DEMEncoderConfig
+from models.dem_encoder import DEMVisionBackbone, DEMEncoderConfig
 from .pyramid_fpn_backbone import PyramidFPNBackbone
 from .convnext_pyramid import ConvNeXtPyramidBackbone
 from .swin_pyramid import SwinPyramidBackbone

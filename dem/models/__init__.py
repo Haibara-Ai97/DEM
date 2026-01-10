@@ -1,8 +1,13 @@
-"""Model components for DEM."""
+"""Backward-compatible re-exports for DEM model components."""
 
-from .backbone import ResNetPyramidBackbone, SimplePyramidBackbone
-from .da_adapter import DAAdapter, DAAdapterConfig
-from .dem_encoder import DEMEncoderConfig, DEMVisionBackbone
+from models import (
+    DAAdapter,
+    DAAdapterConfig,
+    DEMEncoderConfig,
+    DEMVisionBackbone,
+    ResNetPyramidBackbone,
+    SimplePyramidBackbone,
+)
 
 __all__ = [
     "DAAdapter",

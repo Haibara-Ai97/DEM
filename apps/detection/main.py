@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import train_det, eval_det
+from scripts.detection import train_det, eval_det
 
 
 def parse_args(argv=None):
