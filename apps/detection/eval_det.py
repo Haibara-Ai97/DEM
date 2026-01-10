@@ -6,13 +6,19 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
-from models.detector_factory import build_baseline_fasterrcnn, build_dem_fasterrcnn, build_convnext_fasterrcnn, build_swin_fasterrcnn, build_r50_custom_fasterrcnn
-from utils.engine import evaluate
-from utils.misc import collate_fn, load_checkpoint
-from utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
+from .datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
+from .models.detector_factory import (
+    build_baseline_fasterrcnn,
+    build_dem_fasterrcnn,
+    build_convnext_fasterrcnn,
+    build_swin_fasterrcnn,
+    build_r50_custom_fasterrcnn,
+)
+from .utils.engine import evaluate
+from .utils.misc import collate_fn, load_checkpoint
+from .utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser("Evaluate Faster R-CNN on YOLO folder dataset (COCO metrics via generated GT dict)")
     p.add_argument("--data_root", type=str, required=True)
     p.add_argument("--split", type=str, default="valid")
@@ -34,10 +40,10 @@ def parse_args():
 
     p.add_argument("--num_classes", type=int, default=None)
 
-    return p.parse_args()
+    return p.parse_args(argv)
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     classes_path = os.path.join(args.data_root, args.classes_txt)
