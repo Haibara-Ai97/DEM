@@ -9,13 +9,16 @@
 
 ```
 project/
-  train_det.py
-  eval_det.py
-  configs/default.yaml
-  datasets/
-  models/
-  utils/
-  outputs/
+  apps/
+    detection/
+      main.py
+      train_det.py
+      eval_det.py
+      configs/default.yaml
+      datasets/
+      models/
+      utils/
+      outputs/
 
   dataset/
     classes.txt
@@ -117,7 +120,7 @@ wc -l dataset/classes.txt
 ### 5.1 ResNet（Encoder-only Baseline）
 
 ```bash
-python train_det.py \
+python -m apps.detection.main train \
   --data_root /path/to/dataset \
   --model r50_custom_fpn \
   --epochs 24 \
@@ -128,7 +131,7 @@ python train_det.py \
 ### 5.2 ConvNeXt-Tiny（Encoder-only）
 
 ```bash
-python train_det.py \
+python -m apps.detection.main train \
   --data_root /path/to/dataset \
   --model convnext_tiny_fpn \
   --epochs 24 \
@@ -139,7 +142,7 @@ python train_det.py \
 ### 5.3 Swin-Tiny（Encoder-only）
 
 ```bash
-python train_det.py \
+python -m apps.detection.main train \
   --data_root /path/to/dataset \
   --model swin_tiny_fpn \
   --epochs 24 \
@@ -150,7 +153,7 @@ python train_det.py \
 ### 5.4 DEM-Encoder
 
 ```bash
-python train_det.py \
+python -m apps.detection.main train \
   --data_root /path/to/dataset \
   --model dem_resnet50 \
   --epochs 24 \
@@ -163,7 +166,7 @@ python train_det.py \
 * 去掉深层颜色增强（DEM4/DEM5）：
 
 ```bash
-python train_det.py --data_root /path/to/dataset --model dem_resnet50 --disable_dem4 --disable_dem5
+python -m apps.detection.main train --data_root /path/to/dataset --model dem_resnet50 --disable_dem4 --disable_dem5
 ```
 
 ---
@@ -173,7 +176,7 @@ python train_det.py --data_root /path/to/dataset --model dem_resnet50 --disable_
 对 `valid` 集评估：
 
 ```bash
-python eval_det.py \
+python -m apps.detection.main eval \
   --data_root /path/to/dataset \
   --split valid \
   --model dem_resnet50 \

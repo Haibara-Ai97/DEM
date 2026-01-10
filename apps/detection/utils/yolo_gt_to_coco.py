@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 from PIL import Image
 
-from datasets.yolo_dataset import _list_images, _yolo_line_to_xyxy, _IMG_EXTS
+from ..datasets.yolo_dataset import _list_images, _yolo_line_to_xyxy, _IMG_EXTS
 
 def build_coco_gt_from_yolo_split(split_dir: str, class_names: List[str]) -> Dict[str, Any]:
     images_dir = os.path.join(split_dir, "images")

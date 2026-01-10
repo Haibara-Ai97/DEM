@@ -3,20 +3,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 from datetime import datetime
 
 import torch
 from torch.utils.data import DataLoader
 import yaml
 
-from datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
-from models.detector_factory import build_baseline_fasterrcnn, build_dem_fasterrcnn, build_swin_fasterrcnn, build_convnext_fasterrcnn, build_r50_custom_fasterrcnn
-from utils.engine import train_one_epoch, evaluate
-from utils.misc import set_seed, collate_fn, save_checkpoint
-from utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
-from utils.misc import load_checkpoint
+from .datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
+from .models.detector_factory import (
+    build_baseline_fasterrcnn,
+    build_dem_fasterrcnn,
+    build_swin_fasterrcnn,
+    build_convnext_fasterrcnn,
+    build_r50_custom_fasterrcnn,
+)
+from .utils.engine import train_one_epoch, evaluate
+from .utils.misc import set_seed, collate_fn, save_checkpoint
+from .utils.yolo_gt_to_coco import build_coco_gt_from_yolo_split
+from .utils.misc import load_checkpoint
 
-def parse_args():
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.yaml"
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser("Detection Experiment (YOLO folder dataset): Faster R-CNN baseline vs DEM-Encoder backbone")
 
     p.add_argument("--data_root", type=str, required=True, help="Dataset root containing train/valid/test and classes.txt")
@@ -39,7 +48,7 @@ def parse_args():
 
     p.add_argument("--num_classes", type=int, default=None, help="Foreground classes K. If omitted, inferred from classes.txt")
 
-    p.add_argument("--config", type=str, default="configs/default.yaml")
+    p.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
     p.add_argument("--output_dir", type=str, default="outputs")
 
     p.add_argument("--epochs", type=int, default=None)
@@ -63,12 +72,23 @@ def parse_args():
 
     p.add_argument("--resume", type=str, default="", help="Path to checkpoint (.pth) to resume from, e.g. outputs/last.pth")
 
-    return p.parse_args()
+    return p.parse_args(argv)
+
+def resolve_config_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    candidate = Path(__file__).resolve().parent / path
+    if candidate.exists():
+        return str(candidate)
+    return path
 
 def merge_cfg(args):
     cfg = {}
-    if args.config and os.path.exists(args.config):
-        with open(args.config, "r", encoding="utf-8") as f:
+    config_path = resolve_config_path(args.config)
+    if config_path and os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
 
     def pick(name, default=None):
@@ -95,8 +115,8 @@ def merge_cfg(args):
     }
     return merged
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
     cfg = merge_cfg(args)
 
     os.makedirs(args.output_dir, exist_ok=True)
