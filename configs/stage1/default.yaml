@@ -1,5 +1,10 @@
 data:
-  cache_index_csv: data/stage1_clip_cache/index.csv
+  cache_dir: data/stage1_clip_cache
+  cache_index: data/stage1_clip_cache/index.csv
+  cache_format: csv+npz
+  cache_clip_name: openai/clip-vit-base-patch16
+  cache_topk: 10
+  cache_dtype: float16
   llm_phrase_pt: data/llm_phrase_embeds.pt
   domain_vocab: data/domain_vocab.txt
 
