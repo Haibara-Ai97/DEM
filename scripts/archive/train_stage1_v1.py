@@ -1,10 +1,10 @@
+# Archived: legacy stage1 training script (v1). Replaced by Adapter/train_stage1.py + configs.
 # scripts/train_stage1_adapter_alignment_cached.py
 from __future__ import annotations
 import argparse, os, math, random
 from pathlib import Path
 from collections import OrderedDict
 from typing import List, Tuple
-from tqdm import tqdm
 
 import numpy as np
 from PIL import Image
@@ -99,47 +99,6 @@ def symmetric_infonce(v: torch.Tensor, s: torch.Tensor, temperature: float) -> t
     return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.t(), targets))
 
 
-def window_sample_indices_by_conf(conf_hw: torch.Tensor, win: int, mode: str, seed: int = None) -> torch.Tensor:
-    """
-    conf_hw: (H,W) confidence map on the SAME grid as V tokens
-    mode:
-      - random: uniform random in each window
-      - max: pick max confidence in each window
-      - weighted: sample proportional to confidence in each window
-    """
-    if seed is not None:
-        random.seed(seed)
-
-    H, W = conf_hw.shape
-    idxs = []
-    for r in range(0, H, win):
-        for c in range(0, W, win):
-            r2 = min(r + win, H)
-            c2 = min(c + win, W)
-
-            window = conf_hw[r:r2, c:c2].reshape(-1)
-            n = window.numel()
-
-            if mode == "max":
-                j = int(window.argmax().item())
-            elif mode == "weighted":
-                p = window.clamp_min(0)
-                s = float(p.sum().item())
-                if s <= 0:
-                    j = random.randrange(n)
-                else:
-                    j = int(torch.multinomial(p / p.sum(), 1).item())
-            else:  # random
-                j = random.randrange(n)
-
-            ww = (c2 - c)
-            rr = r + (j // ww)
-            cc = c + (j % ww)
-            idxs.append(rr * W + cc)
-
-    return torch.tensor(idxs, dtype=torch.long, device=conf_hw.device)
-
-
 def load_encoder_ckpt_by_suffix(encoder: torch.nn.Module, ckpt_path: str):
     import torch
 
@@ -202,26 +161,10 @@ def main():
 
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--batch_size", type=int, default=8)
-    # ---- resume / logging ----
-    ap.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume (stage1_cached_epoch*.pt)")
-    ap.add_argument("--resume_strict", action="store_true", help="Use strict=True when loading state_dict")
-    ap.add_argument("--log_every", type=int, default=20, help="Print/refresh metrics every N steps")
-
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--wd", type=float, default=0.01)
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--win", type=int, default=2)
-    # ---- teacher soft targets (Top-N) ----
-    ap.add_argument("--teacher_topk", type=int, default=3, help="Top-N soft target from CLIP cache")
-    ap.add_argument("--teacher_temperature", type=float, default=0.03, help="Softmax temp for topv -> weights")
-
-    # ---- confidence filtering / sampling ----
-    ap.add_argument("--conf_thresh", type=float, default=0.0, help="Drop tokens whose max(topv) < thresh")
-    ap.add_argument("--min_tokens", type=int, default=64, help="Skip step if kept tokens < this")
-    ap.add_argument("--sample_mode", type=str, default="weighted",
-                    choices=["random", "max", "weighted"],
-                    help="How to pick one token per window")
-
     ap.add_argument("--image_size", type=int, default=224)
     ap.add_argument("--feat_key", type=str, default="0", choices=["0","1","2","3"])
     ap.add_argument("--align_to_cache_grid", action="store_true", help="把 encoder 特征插值到 cache 的 h,w")
@@ -302,66 +245,9 @@ def main():
         collate_fn=lambda b: collate_cached(b, enc_cfg, args.image_size),
     )
 
-    # -------------------------
-    # Resume support
-    # -------------------------
-    start_epoch = 0
     global_step = 0
-
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location="cpu")
-
-        # models
-        adapter.load_state_dict(ckpt["adapter"], strict=args.resume_strict)
-        if args.train_encoder:
-            if "encoder" in ckpt:
-                encoder.load_state_dict(ckpt["encoder"], strict=args.resume_strict)
-            else:
-                print("[resume] Warning: args.train_encoder=True but no encoder state in ckpt.")
-
-        # optim/scaler
-        if "optim" in ckpt:
-            optim.load_state_dict(ckpt["optim"])
-        else:
-            print("[resume] Warning: no optim state in ckpt (will NOT truly resume optimizer).")
-
-        if "scaler" in ckpt and ckpt["scaler"] is not None:
-            try:
-                scaler.load_state_dict(ckpt["scaler"])
-            except Exception as e:
-                print(f"[resume] Warning: failed to load scaler state: {e}")
-
-        # epoch/step
-        start_epoch = int(ckpt.get("epoch", 0))  # epoch is "next epoch to run"
-        global_step = int(ckpt.get("global_step", 0))
-
-        # RNG states (optional but recommended)
-        rng = ckpt.get("rng", None)
-        if rng is not None:
-            try:
-                random.setstate(rng["py"])
-                np.random.set_state(rng["np"])
-                torch.set_rng_state(rng["torch"])
-                if torch.cuda.is_available() and ("cuda" in rng) and (rng["cuda"] is not None):
-                    torch.cuda.set_rng_state_all(rng["cuda"])
-            except Exception as e:
-                print(f"[resume] Warning: failed to restore RNG states: {e}")
-
-        print(f"[resume] Loaded {args.resume} (start_epoch={start_epoch}, global_step={global_step})")
-
-        # ensure modes are correct after loading
-        adapter.train()
-        if not args.train_encoder:
-            encoder.eval()
-        else:
-            encoder.train()
-
-    # -------------------------
-    # Training loop
-    # -------------------------
-    for epoch in range(start_epoch, args.epochs):
-        pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{args.epochs}", dynamic_ncols=True)
-        for paths, enc_x, topi, topv, (h, w) in pbar:
+    for epoch in range(args.epochs):
+        for paths, enc_x, topi, topv, (h, w) in dl:
             enc_x = enc_x.to(device, non_blocking=True)
             topi = topi.to(device, non_blocking=True)   # (B,N,K)
             topv = topv.to(device, non_blocking=True)   # (B,N,K)
@@ -393,17 +279,8 @@ def main():
                 # print("V batch std =", V.float().std(dim=0).mean().item())
                 V = F.normalize(V, dim=-1)
 
-                # build soft S from cached topi/topv (Top-N weighted)
-                K_total = topi.size(-1)
-                K = min(args.teacher_topk, K_total)
-
-                # weights: softmax(topv / tau)
-                w_logits = topv[..., :K] / max(args.teacher_temperature, 1e-6)  # (B,N_cache,K)
-                w_soft = F.softmax(w_logits, dim=-1)  # (B,N_cache,K)
-
-                # phrase embeds: (B,N_cache,K,d)
-                P = llm_phrase[topi[..., :K]]
-                S = (w_soft.unsqueeze(-1) * P).sum(dim=-2)  # (B,N_cache,d)
+                # build S from cached topi/topv (cache grid: N_cache=h*w)
+                S = llm_phrase[topi[..., 0]]  # (B, N_cache, d)
                 S = F.normalize(S, dim=-1)
 
                 # if V grid differs from cache grid, up/down sample S to match V token count
@@ -414,43 +291,8 @@ def main():
                     S = F.normalize(S, dim=-1)
 
                 idx = window_sample_indices(Hf, Wf, win=args.win, seed=args.seed + global_step).to(device)
-                # ---- build confidence map (from cache topv) and align to V grid ----
-                conf_cache = topv.max(dim=-1).values  # (B,N_cache)
-                conf_map = conf_cache.reshape(B, 1, h, w)  # (B,1,h,w)
-
-                if V.size(1) != N_cache:
-                    conf_map = F.interpolate(conf_map, size=(Hf, Wf), mode="bilinear", align_corners=False)
-
-                conf_map = conf_map.squeeze(1)  # (B,Hf,Wf)
-
-                # ---- per-sample window sampling (better for sparse defects) ----
-                idx_batch = []
-                for b in range(B):
-                    idx_b = window_sample_indices_by_conf(
-                        conf_map[b], win=args.win, mode=args.sample_mode,
-                        seed=args.seed + global_step * 131 + b
-                    )
-                    idx_batch.append(idx_b)
-                idx_batch = torch.stack(idx_batch, dim=0)  # (B, n_win)
-                n_win = idx_batch.size(1)
-
-                # gather tokens
-                gather_index = idx_batch.unsqueeze(-1).expand(B, n_win, llm_dim)
-                V_sel = V.gather(dim=1, index=gather_index)  # (B,n_win,d)
-                S_sel = S.gather(dim=1, index=gather_index)  # (B,n_win,d)
-
-                # gather confidence for filtering
-                conf_flat = conf_map.flatten(1)  # (B,Hf*Wf)
-                conf_sel = conf_flat.gather(1, idx_batch)  # (B,n_win)
-                keep = (conf_sel.reshape(-1) >= args.conf_thresh)  # (M,)
-
-                V_s = V_sel.reshape(-1, llm_dim)[keep]  # (M',d)
-                S_s = S_sel.reshape(-1, llm_dim)[keep]  # (M',d)
-
-                # if too few tokens remain, skip this step (avoid degenerate CE)
-                if V_s.size(0) < args.min_tokens:
-                    global_step += 1
-                    continue
+                V_s = V[:, idx, :].reshape(-1, llm_dim)  # (M,d)
+                S_s = S[:, idx, :].reshape(-1, llm_dim)  # (M,d)
 
                 # ---- centerize + normalize (reduce hubness / anisotropy) ----
                 V_s = V_s - V_s.mean(dim=0, keepdim=True)
@@ -474,7 +316,7 @@ def main():
                         # 只有在 token 与 cache grid 一致时才有离散标签（你现在通常 align_to_cache_grid=True，因此成立）
                         phrase_top1_acc = -1.0
                         if V.size(1) == topi.size(1):
-                            y = topi[..., 0].gather(1, idx_batch).reshape(-1)[keep]  # (M',)
+                            y = topi[:, idx, 0].reshape(-1)  # (M,)
                             sim_phrase = Vn @ llm_phrase.float().t()  # (M, Vocab=38)
                             pred_phrase = sim_phrase.argmax(dim=1)
                             phrase_top1_acc = (pred_phrase == y).float().mean().item()
@@ -482,25 +324,14 @@ def main():
                         # (3) group-correct acc: 允许命中同类 token（缓解“对角线过苛刻”的低估）
                         group_correct_acc = -1.0
                         if V.size(1) == topi.size(1):
-                            y = topi[..., 0].gather(1, idx_batch).reshape(-1)[keep]
+                            y = topi[:, idx, 0].reshape(-1)
                             group_correct_acc = (y[pred_inbatch] == y).float().mean().item()
 
                 # ---- training loss ----
                 loss = symmetric_infonce(V_s, S_s, temperature=args.temperature)
-                if global_step % args.log_every == 0:
-                    msg = (f"step={global_step} loss={loss.item():.4f} "
-                           f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} "
-                           f"group={group_correct_acc:.4f} feat={Hf}x{Wf}")
-                    # tqdm friendly
-                    pbar.set_postfix({
-                        "loss": f"{loss.item():.4f}",
-                        "diag": f"{diag_top1_acc:.4f}",
-                        "phrase": f"{phrase_top1_acc:.4f}",
-                        "group": f"{group_correct_acc:.4f}",
-                        "step": global_step
-                    })
-                    # 若你仍想保留文本日志：用 tqdm.write 避免破坏进度条
-                    tqdm.write(msg)
+                if global_step % 20 == 0:
+                    print(f"step={global_step} loss={loss.item():.4f} "
+                          f"diag={diag_top1_acc:.4f} phrase={phrase_top1_acc:.4f} group={group_correct_acc:.4f} feat={Hf}x{Wf}")
 
             optim.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -509,26 +340,10 @@ def main():
 
             global_step += 1
 
-        ckpt = {
-            "adapter": adapter.state_dict(),
-            "args": vars(args),
-            "optim": optim.state_dict(),
-            "scaler": scaler.state_dict() if args.amp else None,
-            "epoch": epoch + 1,  # next epoch to run
-            "global_step": global_step,
-            "rng": {
-                "py": random.getstate(),
-                "np": np.random.get_state(),
-                "torch": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            },
-        }
+        ckpt = {"adapter": adapter.state_dict(), "args": vars(args)}
         if args.train_encoder:
             ckpt["encoder"] = encoder.state_dict()
-
-        save_path = os.path.join(args.output_dir, f"stage1_cached_epoch{epoch + 1}.pt")
-        torch.save(ckpt, save_path)
-        print(f"[ckpt] saved: {save_path}")
+        torch.save(ckpt, os.path.join(args.output_dir, f"stage1_cached_epoch{epoch+1}.pt"))
 
     print(f"Done. Saved to {args.output_dir}")
 

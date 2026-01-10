@@ -1,0 +1,69 @@
+data:
+  cache_index_csv: data/stage1_clip_cache/index.csv
+  llm_phrase_pt: data/llm_phrase_embeds.pt
+  domain_vocab: data/domain_vocab.txt
+
+output:
+  dir: checkpoints/stage1_cached
+  save_every_epoch: true
+
+training:
+  epochs: 1
+  batch_size: 8
+  lr: 1.0e-4
+  weight_decay: 0.01
+  temperature: 0.07
+  win: 2
+  image_size: 224
+  feat_key: "0"
+  align_to_cache_grid: false
+  train_encoder: false
+  amp: false
+  seed: 42
+
+model:
+  backbone: resnet50
+  backbone_pretrained: false
+  encoder_ckpt: ""
+  disable_dem2: false
+  disable_dem3: false
+  disable_dem4: false
+  disable_dem5: false
+
+teacher:
+  mode: soft  # hard | soft
+  topk: 3
+  temperature: 0.03
+
+sampling:
+  strategy: confidence  # random | confidence
+  conf_thresh: 0.0
+  min_tokens: 64
+  mode: weighted  # random | max | weighted
+
+loss:
+  type: supcon  # infonce | supcon | mix
+  supcon_weight: 0.7
+  supcon_chunk: 0
+
+resume:
+  path: ""
+  strict: false
+  reset_optimizer: false
+  reset_rng: false
+
+scheduler:
+  type: none  # none | step | cosine
+  step_on: epoch  # epoch | step
+  step_size: 1
+  gamma: 0.1
+  t_max: 10
+
+logging:
+  enable: true
+  log_every: 20
+  use_tqdm: true
+  write_log: true
+  write_jsonl: true
+  run_id: null
+  log_dir: null
