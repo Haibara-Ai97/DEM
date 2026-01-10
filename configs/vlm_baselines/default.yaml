@@ -1,0 +1,56 @@
+models:
+  qwen2_5_vl:
+    model_id: Qwen/Qwen2.5-VL-7B-Instruct
+    family: qwen2_5_vl
+  qwen2_vl:
+    model_id: Qwen/Qwen2-VL-7B-Instruct
+    family: qwen2_vl
+  llava_1_5:
+    model_id: llava-hf/llava-1.5-7b-hf
+    family: llava_1_5
+  idefics2:
+    model_id: HuggingFaceM4/idefics2-8b
+    family: idefics2
+  phi3v:
+    model_id: microsoft/Phi-3.5-vision-instruct
+    family: phi3v
+
+training:
+  max_length: 512
+  epochs: 1.0
+  lr: 2.0e-4
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  grad_accum: 8
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  load_in_4bit: false
+  gradient_checkpointing: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  qwen_min_pixels: 0
+  qwen_max_pixels: 0
+  qwen_min_tokens: 256
+  qwen_max_tokens: 256
+  use_slow_processor: false
+  seed: 42
+  max_train_samples: 0
+  max_eval_samples: 0
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+
+evaluation:
+  bf16: true
+  qwen_min_pixels: 0
+  qwen_max_pixels: 0
+  max_samples: 0
+  max_new_tokens_yesno: 4
+  max_new_tokens_multilabel: 24
+  max_new_tokens_count: 8
+  max_new_tokens_grid: 8
+  max_new_tokens_json: 256
