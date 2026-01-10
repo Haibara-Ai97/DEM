@@ -53,9 +53,9 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, TaskType
 
 # ---- Your project modules (same import paths as your existing script) ----
-from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-from models.backbone import ResNetPyramidBackbone
-from models.da_adapter import DAAdapter, DAAdapterConfig
+from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
+from dem.models.backbone import ResNetPyramidBackbone
+from dem.models.da_adapter import DAAdapter, DAAdapterConfig
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 

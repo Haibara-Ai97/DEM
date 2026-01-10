@@ -12,9 +12,9 @@ import torch.nn.functional as F
 from transformers import CLIPModel, CLIPProcessor
 
 # 依赖你的工程代码
-from models.backbone import SimplePyramidBackbone
-from models.da_adapter import DAAdapter, DAAdapterConfig
-from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone  # 你的上传文件（重命名为 dem_encoder.py）
+from dem.models.backbone import SimplePyramidBackbone
+from dem.models.da_adapter import DAAdapter, DAAdapterConfig
+from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone  # 你的上传文件（重命名为 dem_encoder.py）
 
 # 复用你 precompute 脚本的核心逻辑（避免再写一次）
 from transformers import AutoTokenizer, AutoModelForCausalLM

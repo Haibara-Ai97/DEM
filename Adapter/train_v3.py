@@ -19,9 +19,9 @@ from torch.utils.data import Dataset, DataLoader
 
 from tqdm import tqdm
 
-from models.backbone import SimplePyramidBackbone, ResNetPyramidBackbone
-from models.da_adapter import DAAdapter, DAAdapterConfig
-from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
+from dem.models.backbone import SimplePyramidBackbone, ResNetPyramidBackbone
+from dem.models.da_adapter import DAAdapter, DAAdapterConfig
+from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
 
 
 # -------------------------

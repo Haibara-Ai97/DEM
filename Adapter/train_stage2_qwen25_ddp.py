@@ -21,9 +21,9 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, TaskType
 
-from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
-from models.backbone import ResNetPyramidBackbone
-from models.da_adapter import DAAdapter, DAAdapterConfig
+from dem.models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone
+from dem.models.backbone import ResNetPyramidBackbone
+from dem.models.da_adapter import DAAdapter, DAAdapterConfig
 
 # Avoid tokenizers fork warnings in multi-worker settings
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
