@@ -8,7 +8,7 @@ from datetime import datetime
 
 import torch
 from torch.utils.data import DataLoader
-import yaml
+from dem.config_utils import apply_overrides, get_by_path, load_yaml, set_by_path, write_yaml
 
 from .datasets.yolo_dataset import YoloFolderDetection, build_transforms, read_classes_txt
 from .models.detector_factory import (
@@ -28,49 +28,13 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.yam
 def parse_args(argv=None):
     p = argparse.ArgumentParser("Detection Experiment (YOLO folder dataset): Faster R-CNN baseline vs DEM-Encoder backbone")
 
-    p.add_argument("--data_root", type=str, required=True, help="Dataset root containing train/valid/test and classes.txt")
-    p.add_argument("--split_train", type=str, default="train")
-    p.add_argument("--split_val", type=str, default="valid")
-    p.add_argument("--classes_txt", type=str, default="classes.txt")
-
-    p.add_argument(
-        "--model",
-        type=str,
-        default="r50_custom_fpn",
-        choices=[
-            "r50_custom_fpn",
-            "convnext_tiny_fpn",
-            "swin_tiny_fpn",
-            "dem_resnet50",
-            "baseline_resnet50_fpn",
-        ],
-    )
-
-    p.add_argument("--num_classes", type=int, default=None, help="Foreground classes K. If omitted, inferred from classes.txt")
+    p.add_argument("--data_root", type=str, default=None, help="Dataset root containing train/valid/test and classes.txt")
+    p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--device", type=str, default=None)
+    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint (.pth) to resume from, e.g. outputs/last.pth")
 
     p.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
-    p.add_argument("--output_dir", type=str, default="outputs")
-
-    p.add_argument("--epochs", type=int, default=None)
-    p.add_argument("--batch_size", type=int, default=None)
-    p.add_argument("--num_workers", type=int, default=None)
-    p.add_argument("--lr", type=float, default=None)
-    p.add_argument("--weight_decay", type=float, default=None)
-
-    # DEM args
-    p.add_argument("--dem_C", type=int, default=None)
-    p.add_argument("--dem_init_gamma", type=float, default=None)
-    p.add_argument("--dem_lf_kernel", type=int, default=None)
-
-    p.add_argument("--disable_dem2", action="store_true")
-    p.add_argument("--disable_dem3", action="store_true")
-    p.add_argument("--disable_dem4", action="store_true")
-    p.add_argument("--disable_dem5", action="store_true")
-
-    p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--seed", type=int, default=None)
-
-    p.add_argument("--resume", type=str, default="", help="Path to checkpoint (.pth) to resume from, e.g. outputs/last.pth")
+    p.add_argument("--set", action="append", default=[], help="Override config values with key=value")
 
     return p.parse_args(argv)
 
@@ -84,54 +48,42 @@ def resolve_config_path(path: str | None) -> str | None:
         return str(candidate)
     return path
 
-def merge_cfg(args):
-    cfg = {}
-    config_path = resolve_config_path(args.config)
-    if config_path and os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-
-    def pick(name, default=None):
-        v = getattr(args, name)
-        if v is None:
-            return cfg.get(name, default)
-        return v
-
-    merged = {
-        "seed": pick("seed", 42),
-        "epochs": pick("epochs", 24),
-        "batch_size": pick("batch_size", 4),
-        "num_workers": pick("num_workers", 4),
-        "lr": pick("lr", 0.005),
-        "weight_decay": pick("weight_decay", 0.0005),
-        "warmup_iters": cfg.get("warmup_iters", 500),
-        "lr_step_milestones": cfg.get("lr_step_milestones", [16, 22]),
-        "lr_gamma": cfg.get("lr_gamma", 0.1),
-        "dem_C": pick("dem_C", 256),
-        "dem_init_gamma": pick("dem_init_gamma", 0.5),
-        "dem_lf_kernel": pick("dem_lf_kernel", 7),
-        "anchor_sizes": cfg.get("anchor_sizes", [16, 32, 64, 128]),
-        "aspect_ratios": cfg.get("aspect_ratios", [0.5, 1.0, 2.0]),
-    }
-    return merged
-
 def main(argv=None):
     args = parse_args(argv)
-    cfg = merge_cfg(args)
+    cfg_path = resolve_config_path(args.config)
+    cfg = load_yaml(cfg_path) if cfg_path and os.path.exists(cfg_path) else {}
+    apply_overrides(cfg, args.set)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    set_seed(int(args.seed if args.seed is not None else cfg["seed"]))
+    if args.data_root:
+        set_by_path(cfg, "data.root", args.data_root)
+    if args.output_dir:
+        set_by_path(cfg, "output.dir", args.output_dir)
+    if args.device:
+        set_by_path(cfg, "runtime.device", args.device)
+    if args.resume:
+        set_by_path(cfg, "resume.path", args.resume)
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    output_dir = get_by_path(cfg, "output.dir", "outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    write_yaml(Path(output_dir) / "config.yaml", cfg)
+    set_seed(int(get_by_path(cfg, "training.seed", 42)))
 
-    classes_path = os.path.join(args.data_root, args.classes_txt)
+    device_name = get_by_path(cfg, "runtime.device", "cuda")
+    device = torch.device(device_name if torch.cuda.is_available() else "cpu")
+
+    data_root = get_by_path(cfg, "data.root")
+    if not data_root:
+        raise ValueError("Config must set data.root or pass --data_root.")
+
+    classes_path = os.path.join(data_root, get_by_path(cfg, "data.classes_txt", "classes.txt"))
     class_names = read_classes_txt(classes_path)
-    num_classes_fg = args.num_classes if args.num_classes is not None else len(class_names)
+    num_classes_cfg = get_by_path(cfg, "data.num_classes")
+    num_classes_fg = int(num_classes_cfg) if num_classes_cfg is not None else len(class_names)
     if num_classes_fg <= 0:
         raise ValueError("num_classes must be > 0 (or classes.txt must contain class names).")
 
-    train_dir = os.path.join(args.data_root, args.split_train)
-    val_dir = os.path.join(args.data_root, args.split_val)
+    train_dir = os.path.join(data_root, get_by_path(cfg, "data.split_train", "train"))
+    val_dir = os.path.join(data_root, get_by_path(cfg, "data.split_val", "valid"))
 
     train_ds = YoloFolderDetection(
         split_dir=train_dir,
@@ -149,30 +101,31 @@ def main(argv=None):
     )
 
     train_loader = DataLoader(
-        train_ds, batch_size=int(cfg["batch_size"]), shuffle=True,
-        num_workers=int(cfg["num_workers"]), pin_memory=True,
+        train_ds, batch_size=int(get_by_path(cfg, "training.batch_size", 4)), shuffle=True,
+        num_workers=int(get_by_path(cfg, "training.num_workers", 4)), pin_memory=True,
         collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_ds, batch_size=1, shuffle=False,
-        num_workers=max(1, int(cfg["num_workers"]) // 2), pin_memory=True,
+        num_workers=max(1, int(get_by_path(cfg, "training.num_workers", 4)) // 2), pin_memory=True,
         collate_fn=collate_fn
     )
 
-    anchor_sizes = list(cfg["anchor_sizes"])
-    aspect_ratios = list(cfg["aspect_ratios"])
+    anchor_sizes = list(get_by_path(cfg, "model.anchor_sizes", [16, 32, 64, 128]))
+    aspect_ratios = list(get_by_path(cfg, "model.aspect_ratios", [0.5, 1.0, 2.0]))
 
-    if args.model == "baseline_resnet50_fpn":
+    model_name = get_by_path(cfg, "model.name", "r50_custom_fpn")
+    if model_name == "baseline_resnet50_fpn":
         model = build_baseline_fasterrcnn(num_classes_fg)
 
-    elif args.model == "r50_custom_fpn":
+    elif model_name == "r50_custom_fpn":
         model = build_r50_custom_fasterrcnn(
             num_classes_fg,
             anchor_sizes=anchor_sizes,
             aspect_ratios=aspect_ratios,
         )
 
-    elif args.model == "convnext_tiny_fpn":
+    elif model_name == "convnext_tiny_fpn":
         model = build_convnext_fasterrcnn(
             num_classes_fg,
             anchor_sizes=anchor_sizes,
@@ -181,7 +134,7 @@ def main(argv=None):
             pretrained_convnext=True,
         )
 
-    elif args.model == "swin_tiny_fpn":
+    elif model_name == "swin_tiny_fpn":
         model = build_swin_fasterrcnn(
             num_classes_fg,
             anchor_sizes=anchor_sizes,
@@ -190,32 +143,39 @@ def main(argv=None):
             pretrained_swin=True,
         )
 
-    elif args.model == "dem_resnet50":
+    elif model_name == "dem_resnet50":
         model = build_dem_fasterrcnn(
             num_classes_fg,
-            dem_C=int(cfg["dem_C"]),
-            init_gamma=float(cfg["dem_init_gamma"]),
-            lf_kernel=int(cfg["dem_lf_kernel"]),
+            dem_C=int(get_by_path(cfg, "model.dem.C", 256)),
+            init_gamma=float(get_by_path(cfg, "model.dem.init_gamma", 0.5)),
+            lf_kernel=int(get_by_path(cfg, "model.dem.lf_kernel", 7)),
             anchor_sizes=anchor_sizes,
             aspect_ratios=aspect_ratios,
-            disable_dem2=args.disable_dem2,
-            disable_dem3=args.disable_dem3,
-            disable_dem4=args.disable_dem4,
-            disable_dem5=args.disable_dem5,
+            disable_dem2=bool(get_by_path(cfg, "model.dem.disable_dem2", False)),
+            disable_dem3=bool(get_by_path(cfg, "model.dem.disable_dem3", False)),
+            disable_dem4=bool(get_by_path(cfg, "model.dem.disable_dem4", False)),
+            disable_dem5=bool(get_by_path(cfg, "model.dem.disable_dem5", False)),
         )
     else:
-        raise ValueError(f"Unknown model: {args.model}")
+        raise ValueError(f"Unknown model: {model_name}")
 
     model.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=float(cfg["lr"]), momentum=0.9, weight_decay=float(cfg["weight_decay"]))
-
-    lr_scheduler_main = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=list(cfg["lr_step_milestones"]), gamma=float(cfg["lr_gamma"])
+    optimizer = torch.optim.SGD(
+        params,
+        lr=float(get_by_path(cfg, "training.lr", 0.005)),
+        momentum=0.9,
+        weight_decay=float(get_by_path(cfg, "training.weight_decay", 0.0005)),
     )
 
-    warmup_iters = int(cfg["warmup_iters"])
+    lr_scheduler_main = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=list(get_by_path(cfg, "training.lr_step_milestones", [16, 22])),
+        gamma=float(get_by_path(cfg, "training.lr_gamma", 0.1)),
+    )
+
+    warmup_iters = int(get_by_path(cfg, "training.warmup_iters", 500))
     def warmup_lambda(it):
         if it >= warmup_iters:
             return 1.0
@@ -226,13 +186,14 @@ def main(argv=None):
     coco_gt_val = build_coco_gt_from_yolo_split(val_dir, class_names=class_names[:num_classes_fg])
 
     best_map = -1.0
-    metrics_path = os.path.join(args.output_dir, "metrics.jsonl")
+    metrics_path = os.path.join(output_dir, "metrics.jsonl")
 
     start_epoch = 0
-    if args.resume:
+    resume_path = get_by_path(cfg, "resume.path", "")
+    if resume_path:
         model_to_load = model
         ckpt = load_checkpoint(
-            args.resume,
+            resume_path,
             model_to_load,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler_main,
@@ -241,10 +202,10 @@ def main(argv=None):
         start_epoch = int(ckpt.get("epoch", -1))+1
         best_map = float(ckpt.get("best_map", -1.0))
 
-        print(f"[Resume] Loaded {args.resume}")
+        print(f"[Resume] Loaded {resume_path}")
         print(f"[Resume] start epoch: {start_epoch}, best_map: {best_map:.4}")
 
-    for epoch in range(start_epoch, int(cfg["epochs"])):
+    for epoch in range(start_epoch, int(get_by_path(cfg, "training.epochs", 24))):
         lr_sched = lr_scheduler_warmup if (epoch == 0 and warmup_iters > 0) else None
 
         train_stats = train_one_epoch(model, optimizer, train_loader, device, epoch, lr_scheduler=lr_sched)
@@ -258,19 +219,24 @@ def main(argv=None):
             "train": train_stats,
             "val": val_stats,
             "lr": optimizer.param_groups[0]["lr"],
-            "model": args.model,
+            "model": model_name,
             "num_classes_fg": int(num_classes_fg),
-            "disable_dem": {"dem2": bool(args.disable_dem2), "dem3": bool(args.disable_dem3), "dem4": bool(args.disable_dem4), "dem5": bool(args.disable_dem5)},
+            "disable_dem": {
+                "dem2": bool(get_by_path(cfg, "model.dem.disable_dem2", False)),
+                "dem3": bool(get_by_path(cfg, "model.dem.disable_dem3", False)),
+                "dem4": bool(get_by_path(cfg, "model.dem.disable_dem4", False)),
+                "dem5": bool(get_by_path(cfg, "model.dem.disable_dem5", False)),
+            },
             "cfg": cfg,
         }
         with open(metrics_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         # checkpoints
-        save_checkpoint(os.path.join(args.output_dir, "last.pth"), model, optimizer, lr_scheduler_main, epoch, best_map)
+        save_checkpoint(os.path.join(output_dir, "last.pth"), model, optimizer, lr_scheduler_main, epoch, best_map)
         if val_stats.get("mAP", 0.0) > best_map:
             best_map = float(val_stats["mAP"])
-            save_checkpoint(os.path.join(args.output_dir, "model_best.pth"), model, optimizer, lr_scheduler_main, epoch, best_map)
+            save_checkpoint(os.path.join(output_dir, "model_best.pth"), model, optimizer, lr_scheduler_main, epoch, best_map)
 
         print(f"[Epoch {epoch}] train_loss={train_stats['loss']:.4f}  val_mAP={val_stats.get('mAP', 0.0):.4f}  best={best_map:.4f}")
 
