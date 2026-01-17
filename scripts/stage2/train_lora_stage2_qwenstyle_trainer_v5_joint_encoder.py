@@ -498,6 +498,7 @@ def parse_args():
     p.add_argument("--logging_steps", type=int, default=20)
     p.add_argument("--save_steps", type=int, default=500)
     p.add_argument("--save_total_limit", type=int, default=2)
+    p.add_argument("--save_safetensors", action="store_true", default=False)
     p.add_argument("--dataloader_num_workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
 
@@ -652,6 +653,7 @@ def main():
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        save_safetensors=args.save_safetensors,
         bf16=args.bf16,
         fp16=args.fp16,
         dataloader_num_workers=args.dataloader_num_workers,
