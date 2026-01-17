@@ -380,6 +380,24 @@ class VisionPrefixQwen(nn.Module):
 # Trainer with param groups
 # -------------------------
 class MultiGroupTrainer(Trainer):
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False) -> None:
+        if not self.is_world_process_zero():
+            return
+        if output_dir is None:
+            output_dir = self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        try:
+            super().save_model(output_dir, _internal_call=_internal_call)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "share memory" not in msg:
+                raise
+            print(
+                "[save] safetensors failed due to shared tensors; falling back to torch.save().",
+                flush=True,
+            )
+            torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+
     def create_optimizer(self):
         if self.optimizer is not None:
             return self.optimizer
@@ -640,7 +658,7 @@ def main():
     )
 
     # TrainingArguments
-    targs_kwargs = dict(
+    targs = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -653,7 +671,6 @@ def main():
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
-        save_safetensors=args.save_safetensors,
         bf16=args.bf16,
         fp16=args.fp16,
         dataloader_num_workers=args.dataloader_num_workers,
@@ -661,9 +678,6 @@ def main():
         report_to=[],
         deepspeed=args.deepspeed,
     )
-    if "save_safetensors" in TrainingArguments.__init__.__code__.co_varnames:
-        targs_kwargs["save_safetensors"] = args.save_safetensors
-    targs = TrainingArguments(**targs_kwargs)
 
     # Trainer (tokenizer kwarg compatibility)
     import inspect as _inspect
