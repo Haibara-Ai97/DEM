@@ -640,7 +640,7 @@ def main():
     )
 
     # TrainingArguments
-    targs = TrainingArguments(
+    targs_kwargs = dict(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -661,6 +661,9 @@ def main():
         report_to=[],
         deepspeed=args.deepspeed,
     )
+    if "save_safetensors" in TrainingArguments.__init__.__code__.co_varnames:
+        targs_kwargs["save_safetensors"] = args.save_safetensors
+    targs = TrainingArguments(**targs_kwargs)
 
     # Trainer (tokenizer kwarg compatibility)
     import inspect as _inspect
