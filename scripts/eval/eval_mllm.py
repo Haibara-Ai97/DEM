@@ -29,6 +29,7 @@ import json
 import math
 import os
 import re
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,10 @@ import torch.nn.functional as F
 from contextlib import nullcontext
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     from peft import PeftModel
