@@ -84,9 +84,15 @@ def build_prompt_ids(tokenizer, system: str, user: str, max_text_len: int) -> to
     """
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     if hasattr(tokenizer, "apply_chat_template"):
-        ids = tokenizer.apply_chat_template(
+        out = tokenizer.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True, return_tensors="pt"
-        )[0]
+        )
+        if isinstance(out, torch.Tensor):
+            ids = out[0]
+        elif hasattr(out, "input_ids"):
+            ids = torch.tensor(out.input_ids, dtype=torch.long)
+        else:
+            ids = torch.tensor(out, dtype=torch.long)
     else:
         text = f"System: {system}\nUser: {user}\nAssistant:"
         ids = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_text_len).input_ids[0]
