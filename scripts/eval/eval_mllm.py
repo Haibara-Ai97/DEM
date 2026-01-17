@@ -130,6 +130,7 @@ class VisionPrefixGenerator(nn.Module):
         B, N, _ = vtok.shape
 
         tok_emb = self.llm.get_input_embeddings()(input_ids)  # (B,L,D)
+        vtok = vtok.to(dtype=tok_emb.dtype)
         inputs_embeds = torch.cat([vtok, tok_emb], dim=1)     # (B,N+L,D)
 
         prefix_mask = torch.ones((B, N), dtype=attention_mask.dtype, device=attention_mask.device)
