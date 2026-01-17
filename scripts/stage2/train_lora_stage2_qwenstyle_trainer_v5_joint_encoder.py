@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -53,6 +54,10 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, TaskType
 
 # ---- Your project modules (same import paths as your existing script) ----
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from models.dem_encoder import DEMEncoderConfig, DEMVisionBackbone, ResNetPyramidBackbone
 from models.da_adapter import DAAdapter, DAAdapterConfig
 
