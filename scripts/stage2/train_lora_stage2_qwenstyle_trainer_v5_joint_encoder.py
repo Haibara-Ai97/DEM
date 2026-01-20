@@ -200,19 +200,35 @@ class JsonlSFTDataset(Dataset):
         return ex, img
 
 
-def build_input_and_labels(tokenizer, system: str, user: str, assistant: str, max_len: int):
+def _user_content_with_image_token(user: str, image_token: str) -> str:
+    user = user or ""
+    if image_token and image_token not in user:
+        return f"{image_token}\n{user}".strip()
+    return user
+
+
+def build_input_and_labels(
+    tokenizer,
+    system: str,
+    user: str,
+    assistant: str,
+    max_len: int,
+    image_token: str,
+):
     """
     Build full ids and prompt ids; labels mask prompt tokens.
     """
     if hasattr(tokenizer, "apply_chat_template"):
+        user_content = _user_content_with_image_token(user, image_token)
+
         msgs_full = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user_content},
             {"role": "assistant", "content": assistant},
         ]
         msgs_prompt = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user_content},
         ]
 
         def _to_1d_tensor(x):
@@ -253,7 +269,8 @@ def build_input_and_labels(tokenizer, system: str, user: str, assistant: str, ma
         return full_ids, attn, labels
 
     # fallback
-    text = f"System: {system}\nUser: {user}\nAssistant: {assistant}"
+    user_text = _user_content_with_image_token(user, image_token)
+    text = f"System: {system}\nUser: {user_text}\nAssistant: {assistant}"
     enc = tokenizer(text, truncation=True, max_length=max_len, return_tensors="pt")
     input_ids = enc["input_ids"][0]
     attn = enc["attention_mask"][0]
@@ -267,6 +284,7 @@ class DataCollatorSFT:
     enc_cfg: DEMEncoderConfig
     image_size: int
     max_text_len: int
+    image_token: str
 
     def __call__(self, batch):
         exs, imgs = zip(*batch)
@@ -285,6 +303,7 @@ class DataCollatorSFT:
                 ex["user"],
                 ex["assistant"],
                 self.max_text_len,
+                self.image_token,
             )
             input_ids_list.append(inp)
             attn_list.append(attn)
@@ -450,6 +469,14 @@ def parse_args():
     p.add_argument("--train_jsonl", type=str, required=True)
     p.add_argument("--image_size", type=int, default=224)
     p.add_argument("--max_text_len", type=int, default=512)
+    p.add_argument("--image_token", type=str, default="<image>")
+    p.add_argument("--add_image_token", action="store_true")
+    p.add_argument("--no_add_image_token", action="store_false", dest="add_image_token")
+    p.set_defaults(add_image_token=True)
+    p.add_argument("--lora_joint_tuning", action="store_true",
+                   help="When using LoRA, also tune vision encoder + adapter.")
+    p.add_argument("--no_lora_joint_tuning", action="store_false", dest="lora_joint_tuning")
+    p.set_defaults(lora_joint_tuning=True)
 
     # LLM
     p.add_argument("--llm_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
@@ -494,8 +521,8 @@ def parse_args():
 
     # LoRA
     p.add_argument("--use_lora", action="store_true")
-    p.add_argument("--lora_r", type=int, default=16)
-    p.add_argument("--lora_alpha", type=int, default=64)
+    p.add_argument("--lora_r", type=int, default=64)
+    p.add_argument("--lora_alpha", type=int, default=128)
     p.add_argument("--lora_dropout", type=float, default=0.05)
     p.add_argument("--lora_target", type=str, default="qkvomlp",
                    help="qv|qkv|qkvo|qkvomlp (default)")
@@ -505,9 +532,13 @@ def parse_args():
     p.add_argument("--num_train_epochs", type=float, default=1.0)
     p.add_argument("--per_device_train_batch_size", type=int, default=1)
     p.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    p.add_argument("--learning_rate", type=float, default=2e-4)
-    p.add_argument("--adapter_lr", type=float, default=1e-4)
-    p.add_argument("--encoder_lr", type=float, default=2e-5)
+    p.add_argument("--learning_rate", type=float, default=1e-4)
+    p.add_argument("--adapter_lr", type=float, default=1e-4,
+                   help="(Deprecated) Alias of --mm_projector_lr.")
+    p.add_argument("--encoder_lr", type=float, default=2e-5,
+                   help="(Deprecated) Alias of --vision_tower_lr.")
+    p.add_argument("--mm_projector_lr", type=float, default=1e-4)
+    p.add_argument("--vision_tower_lr", type=float, default=2e-5)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--warmup_ratio", type=float, default=0.03)
     p.add_argument("--lr_scheduler_type", type=str, default="cosine")
@@ -552,6 +583,9 @@ def _count_trainable(model: nn.Module) -> Tuple[int, int]:
 
 def main():
     args = parse_args()
+    if args.use_lora and args.lora_joint_tuning:
+        args.freeze_encoder = False
+        args.freeze_adapter = False
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -561,6 +595,11 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.llm_name, use_fast=True, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if args.add_image_token and args.image_token:
+        special_tokens = {"additional_special_tokens": [args.image_token]}
+        added = tokenizer.add_special_tokens(special_tokens)
+    else:
+        added = 0
 
     # LLM
     model_kwargs = dict(trust_remote_code=True, low_cpu_mem_usage=True)
@@ -570,6 +609,8 @@ def main():
     if args.attn_implementation:
         model_kwargs["attn_implementation"] = args.attn_implementation
     llm = AutoModelForCausalLM.from_pretrained(args.llm_name, **model_kwargs)
+    if added > 0:
+        llm.resize_token_embeddings(len(tokenizer))
 
     # LoRA
     if args.use_lora:
@@ -655,6 +696,7 @@ def main():
         enc_cfg=enc_cfg,
         image_size=args.image_size,
         max_text_len=args.max_text_len,
+        image_token=args.image_token,
     )
 
     # TrainingArguments
@@ -692,8 +734,8 @@ def main():
         _trainer_kwargs["tokenizer"] = tokenizer
 
     trainer = MultiGroupTrainer(**_trainer_kwargs)
-    trainer._adapter_lr = args.adapter_lr
-    trainer._encoder_lr = args.encoder_lr
+    trainer._adapter_lr = args.mm_projector_lr if args.mm_projector_lr is not None else args.adapter_lr
+    trainer._encoder_lr = args.vision_tower_lr if args.vision_tower_lr is not None else args.encoder_lr
 
     if rank0:
         trn, tot = _count_trainable(mm_model)
