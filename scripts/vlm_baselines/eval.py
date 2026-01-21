@@ -282,6 +282,7 @@ def main():
     ap.add_argument("--adapter_dir", type=str, default="")
     ap.add_argument("--jsonl", type=str, required=True)
     ap.add_argument("--split", type=str, default="test", choices=["train", "valid", "test"])
+    ap.add_argument("--output_dir", type=str, default="", help="Optional directory to save eval_results.json.")
 
     ap.add_argument("--bf16", action="store_true", default=None)
 
@@ -465,6 +466,14 @@ def main():
     # -------------------------
     # Print results
     # -------------------------
+    results: Dict[str, Any] = {
+        "model_id": args.model_id,
+        "family": args.family,
+        "adapter_dir": args.adapter_dir,
+        "jsonl": args.jsonl,
+        "split": args.split,
+        "num_samples": len(data),
+    }
     print("========== EVAL RESULTS ==========")
 
     # yesno
@@ -477,12 +486,20 @@ def main():
         mf1 = macro_f1_yesno(yesno_true, y_pred_clean)
         invalid = sum(1 for v in yesno_valid if not v)
         print(f"[yesno] valid_rate={valid_rate:.4f}  acc={acc:.4f}  bacc={bacc:.4f}  macro_f1={mf1:.4f}  invalid={invalid}")
+        results["yesno"] = {
+            "valid_rate": valid_rate,
+            "acc": acc,
+            "bacc": bacc,
+            "macro_f1": mf1,
+            "invalid": invalid,
+        }
 
         # per-defect breakdown
         by_def = defaultdict(list)
         for t, p, d, v in zip(yesno_true, y_pred_clean, yesno_defect, yesno_valid):
             by_def[d].append((t, p, v))
         print("[yesno] per-defect (top 20 by support):")
+        per_defect_metrics = []
         for d, rows in sorted(by_def.items(), key=lambda x: len(x[1]), reverse=True)[:20]:
             tlist = [r[0] for r in rows]
             plist = [r[1] for r in rows]
@@ -492,6 +509,17 @@ def main():
             d_mf1 = macro_f1_yesno(tlist, plist)
             d_valid = sum(vlist) / len(vlist)
             print(f"  - {d:14s} n={len(rows):4d}   acc={d_acc:.3f} bacc={d_bacc:.3f} macro_f1={d_mf1:.3f} valid={d_valid:.3f}")
+            per_defect_metrics.append(
+                {
+                    "defect": d,
+                    "n": len(rows),
+                    "acc": d_acc,
+                    "bacc": d_bacc,
+                    "macro_f1": d_mf1,
+                    "valid": d_valid,
+                }
+            )
+        results["yesno_per_defect"] = per_defect_metrics
 
     # multilabel
     if ml_true:
@@ -500,6 +528,12 @@ def main():
         mf1 = micro_f1_multilabel(ml_true, ml_pred)
         ef1 = example_f1_multilabel(ml_true, ml_pred)
         print(f"[multilabel] valid_rate={valid_rate:.4f}  micro_f1={mf1:.4f}  example_f1={ef1:.4f}  invalid={invalid}")
+        results["multilabel"] = {
+            "valid_rate": valid_rate,
+            "micro_f1": mf1,
+            "example_f1": ef1,
+            "invalid": invalid,
+        }
 
     # count
     if cnt_errs:
@@ -509,6 +543,14 @@ def main():
         within1 = cnt_within1 / len(cnt_errs)
         mae, rmse = mae_rmse(cnt_errs)
         print(f"[count] valid_rate={valid_rate:.4f}  exact_acc={exact:.4f}  within1_acc={within1:.4f}  MAE={mae:.4f}  RMSE={rmse:.4f}  invalid={invalid}")
+        results["count"] = {
+            "valid_rate": valid_rate,
+            "exact_acc": exact,
+            "within1_acc": within1,
+            "mae": mae,
+            "rmse": rmse,
+            "invalid": invalid,
+        }
 
     # grid
     if grid_l1s:
@@ -518,6 +560,13 @@ def main():
         within1 = grid_within1 / len(grid_l1s)
         mean_l1 = sum(grid_l1s) / len(grid_l1s)
         print(f"[grid] valid_rate={valid_rate:.4f}  exact_acc={exact:.4f}  within1_acc={within1:.4f}  mean_L1={mean_l1:.4f}  invalid={invalid}")
+        results["grid"] = {
+            "valid_rate": valid_rate,
+            "exact_acc": exact,
+            "within1_acc": within1,
+            "mean_l1": mean_l1,
+            "invalid": invalid,
+        }
 
     # json
     if json_parse_ok:
@@ -529,6 +578,23 @@ def main():
         sev_acc = sum(json_sev_accs) / len(json_sev_accs)
         cell_acc = sum(json_cell_accs) / len(json_cell_accs)
         print(f"[json] parse_rate={parse_rate:.4f}  schema_rate={schema_rate:.4f}  overall_acc={overall_acc:.4f}  type_f1={type_f1:.4f}  count_MAE={count_mae:.4f}  severity_acc={sev_acc:.4f}  cell_acc={cell_acc:.4f}")
+        results["json"] = {
+            "parse_rate": parse_rate,
+            "schema_rate": schema_rate,
+            "overall_acc": overall_acc,
+            "type_f1": type_f1,
+            "count_mae": count_mae,
+            "severity_acc": sev_acc,
+            "cell_acc": cell_acc,
+        }
+
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "eval_results.json"
+        with output_path.open("w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] Saved eval results to: {output_path}")
 
 
 if __name__ == "__main__":
