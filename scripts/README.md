@@ -61,7 +61,7 @@ This directory contains the latest training, fine-tuning, evaluation, and data-p
     ```bash
     python -m scripts.vlm_baselines.qwen25vl_infer \
       --image /path/or/url/to/image.jpg \
-      --text "请描述图像中的关键信息"
+      --text_file /path/to/prompt.txt
     ```
 
 - `vlm_baselines/eval.py`

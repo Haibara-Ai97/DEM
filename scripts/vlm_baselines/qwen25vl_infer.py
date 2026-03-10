@@ -5,11 +5,11 @@
 Examples:
   python -m scripts.vlm_baselines.qwen25vl_infer \
     --image https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg \
-    --text "请描述图中主要内容"
+    --text_file /path/to/prompt.txt
 
   python -m scripts.vlm_baselines.qwen25vl_infer \
     --image /path/to/image.jpg \
-    --text "这张图里有什么裂缝？" \
+    --text_file /path/to/prompt.txt \
     --system "你是一个混凝土缺陷巡检助手"
 """
 
@@ -25,7 +25,7 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Call Qwen2.5-VL-7B directly with an image path/URL + text prompt.")
     ap.add_argument("--image", type=str, required=True, help="Image path (local file) or URL.")
-    ap.add_argument("--text", type=str, required=True, help="User text prompt.")
+    ap.add_argument("--text_file", type=str, required=True, help="Path to a UTF-8 txt file containing the user prompt (supports multi-line text).")
     ap.add_argument("--system", type=str, default="你是一个有帮助的视觉问答助手。", help="Optional system prompt.")
     ap.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct", help="HF model id.")
     ap.add_argument("--max_new_tokens", type=int, default=256)
@@ -34,11 +34,24 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+
+
+def load_text_prompt(text_file: str) -> str:
+    p = Path(text_file)
+    if not p.exists():
+        raise FileNotFoundError(f"Text file not found: {text_file}")
+    prompt = p.read_text(encoding="utf-8")
+    if not prompt.strip():
+        raise ValueError(f"Text file is empty: {text_file}")
+    return prompt
+
 def main() -> None:
     args = parse_args()
 
     if not args.image.startswith(("http://", "https://")) and not Path(args.image).exists():
         raise FileNotFoundError(f"Image not found: {args.image}")
+
+    user_text = load_text_prompt(args.text_file)
 
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,7 +73,7 @@ def main() -> None:
             "role": "user",
             "content": [
                 {"type": "image", "image": args.image},
-                {"type": "text", "text": args.text},
+                {"type": "text", "text": user_text},
             ],
         },
     ]
