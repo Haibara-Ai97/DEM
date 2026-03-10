@@ -55,6 +55,15 @@ This directory contains the latest training, fine-tuning, evaluation, and data-p
       --output_dir runs/qwen25vl_lora
     ```
 
+- `vlm_baselines/qwen25vl_infer.py`
+  - **Purpose**: 单条样本推理脚本，直接调用 `Qwen/Qwen2.5-VL-7B-Instruct`，输入图片地址（本地路径或 URL）+ 文本并输出回答。
+  - **Command**:
+    ```bash
+    python -m scripts.vlm_baselines.qwen25vl_infer \
+      --image /path/or/url/to/image.jpg \
+      --text_file /path/to/prompt.txt
+    ```
+
 - `vlm_baselines/eval.py`
   - **Purpose**: Unified evaluation for baseline VLM tasks (yesno/multilabel/count/grid/json).
   - **Command**:
