@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max_new_tokens", type=int, default=256)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_p", type=float, default=0.95)
+    ap.add_argument(
+        "--save_visual_dir",
+        type=str,
+        default="",
+        help="Optional output dir to save visual-encoder feature/attention tensors during inference.",
+    )
     return ap.parse_args()
 
 
@@ -44,6 +50,68 @@ def load_text_prompt(text_file: str) -> str:
     if not prompt.strip():
         raise ValueError(f"Text file is empty: {text_file}")
     return prompt
+
+
+def _save_visual_artifacts(
+    model: Qwen2_5_VLForConditionalGeneration,
+    model_inputs: dict[str, torch.Tensor],
+    save_dir: str,
+) -> None:
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pixel_values = model_inputs.get("pixel_values")
+    image_grid_thw = model_inputs.get("image_grid_thw")
+    if pixel_values is None:
+        print("[warn] save_visual_dir is set but no pixel_values found in model_inputs, skip saving.")
+        return
+
+    torch.save(pixel_values.detach().cpu(), out_dir / "pixel_values.pt")
+    if image_grid_thw is not None:
+        torch.save(image_grid_thw.detach().cpu(), out_dir / "image_grid_thw.pt")
+
+    visual = getattr(model, "visual", None)
+    if visual is None:
+        print("[warn] model.visual not found, only saved pixel_values/image_grid_thw.")
+        return
+
+    vis_kwargs: dict[str, torch.Tensor] = {"pixel_values": pixel_values}
+    if image_grid_thw is not None:
+        vis_kwargs["grid_thw"] = image_grid_thw
+
+    with torch.no_grad():
+        try:
+            vis_out = visual(
+                **vis_kwargs,
+                output_hidden_states=True,
+                output_attentions=True,
+                return_dict=True,
+            )
+        except TypeError:
+            vis_out = visual(**vis_kwargs)
+
+    hidden_states = getattr(vis_out, "hidden_states", None)
+    attentions = getattr(vis_out, "attentions", None)
+    if torch.is_tensor(vis_out):
+        torch.save(vis_out.detach().cpu(), out_dir / "vision_output.pt")
+
+    if hidden_states is not None:
+        hidden_cpu = tuple(h.detach().cpu() for h in hidden_states)
+        torch.save(hidden_cpu, out_dir / "vision_hidden_states.pt")
+        torch.save(hidden_cpu[-1], out_dir / "vision_last_hidden_state.pt")
+
+        if image_grid_thw is not None and hidden_cpu[-1].ndim == 3:
+            t, h, w = image_grid_thw[0].detach().cpu().tolist()
+            if t * h * w == hidden_cpu[-1].shape[1]:
+                feat_2d = hidden_cpu[-1][0].view(t, h, w, -1).mean(dim=0).permute(2, 0, 1).contiguous()
+                torch.save(feat_2d, out_dir / "vision_feature_map_tmean.pt")
+
+    if attentions is not None:
+        attn_cpu = tuple(a.detach().cpu() for a in attentions)
+        torch.save(attn_cpu, out_dir / "vision_attentions.pt")
+        torch.save(attn_cpu[-1], out_dir / "vision_last_layer_attention.pt")
+
+    print(f"[info] visual artifacts saved to: {out_dir.resolve()}")
 
 def main() -> None:
     args = parse_args()
@@ -92,6 +160,9 @@ def main() -> None:
     if device == "cpu":
         model = model.to(device)
     model_inputs = {k: v.to(model.device) for k, v in model_inputs.items()}
+
+    if args.save_visual_dir:
+        _save_visual_artifacts(model, model_inputs, args.save_visual_dir)
 
     do_sample = args.temperature > 0
     with torch.no_grad():
